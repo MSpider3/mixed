@@ -6,11 +6,19 @@ use ratatui::{
     Frame,
 };
 
+use std::cell::RefCell;
+
 /// Block characters for spectrum bars (8 levels of height).
 const BAR_CHARS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// Gradient colors for bar height (bottom to top).
 const SPECTRUM_GRADIENT: &[Color] = &[Color::Cyan, Color::Magenta, Color::LightMagenta];
+
+thread_local! {
+    /// Cache of pre-repeated bar character strings for the current bar_width.
+    /// Recomputed only when the terminal is resized (i.e. when bar_width changes).
+    static BAR_CACHE: RefCell<Option<(usize, [String; 9])>> = RefCell::new(None);
+}
 
 /// Render spectrum visualizer using block characters.
 pub fn render_spectrum(f: &mut Frame, area: Rect, bars: &[u16], max_height: u16) {
@@ -36,12 +44,35 @@ pub fn render_spectrum(f: &mut Frame, area: Rect, bars: &[u16], max_height: u16)
         0
     };
 
-    let mut lines: Vec<Line> = Vec::new();
+    // Rebuild the cached strings if bar_width has changed
+    BAR_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let need_rebuild = match &*cache {
+            Some((cached_width, _)) => *cached_width != bar_width,
+            None => true,
+        };
+        if need_rebuild {
+            let arr = [
+                BAR_CHARS[0].to_string().repeat(bar_width),
+                BAR_CHARS[1].to_string().repeat(bar_width),
+                BAR_CHARS[2].to_string().repeat(bar_width),
+                BAR_CHARS[3].to_string().repeat(bar_width),
+                BAR_CHARS[4].to_string().repeat(bar_width),
+                BAR_CHARS[5].to_string().repeat(bar_width),
+                BAR_CHARS[6].to_string().repeat(bar_width),
+                BAR_CHARS[7].to_string().repeat(bar_width),
+                BAR_CHARS[8].to_string().repeat(bar_width),
+            ];
+            *cache = Some((bar_width, arr));
+        }
+    });
+
+    let mut lines: Vec<Line> = Vec::with_capacity(height);
 
     // Render from top row to bottom row
     for row in 0..height {
         let row_from_bottom = height - 1 - row;
-        let mut spans = Vec::new();
+        let mut spans = Vec::with_capacity(num_bars + 2);
 
         // Left padding spaces
         if left_padding > 0 {
@@ -53,12 +84,12 @@ pub fn render_spectrum(f: &mut Frame, area: Rect, bars: &[u16], max_height: u16)
             let full_rows = bar_height / 8;
             let partial = bar_height % 8;
 
-            let ch = if row_from_bottom < full_rows {
-                BAR_CHARS[8] // Full block
+            let ch_idx = if row_from_bottom < full_rows {
+                8 // Full block
             } else if row_from_bottom == full_rows && partial > 0 {
-                BAR_CHARS[partial]
+                partial
             } else {
-                ' '
+                0
             };
 
             // Color based on relative height
@@ -72,8 +103,13 @@ pub fn render_spectrum(f: &mut Frame, area: Rect, bars: &[u16], max_height: u16)
                 .min(SPECTRUM_GRADIENT.len() - 1);
             let color = SPECTRUM_GRADIENT[color_idx];
 
+            let ch_str = BAR_CACHE.with(|cache| {
+                let cache = cache.borrow();
+                cache.as_ref().unwrap().1[ch_idx].clone()
+            });
+
             spans.push(Span::styled(
-                ch.to_string().repeat(bar_width),
+                ch_str,
                 Style::default().fg(color),
             ));
 
@@ -105,12 +141,14 @@ pub fn render_braille(f: &mut Frame, area: Rect, bars: &[f32]) {
     let height = area.height as usize;
 
     // Map normalized bars to braille characters
-    let mut lines: Vec<Line> = Vec::new();
+    let mut lines: Vec<Line> = Vec::with_capacity(height);
 
     for row in 0..height {
         let row_from_bottom = height - 1 - row;
         let threshold = row_from_bottom as f32 / height as f32;
-        let mut text = String::new();
+        // Pre-allocate space for 3-byte braille characters or 1-byte space characters.
+        // On average, width * 2 bytes is a very safe estimate.
+        let mut text = String::with_capacity(width * 3);
 
         for col in 0..width {
             let bar_idx = (col * bars.len()) / width;

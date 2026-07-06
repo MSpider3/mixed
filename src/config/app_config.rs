@@ -37,7 +37,17 @@ impl Default for AppConfig {
 
 /// Returns the path to the config file.
 pub fn config_path() -> PathBuf {
-    if let Some(dir) = directories::ProjectDirs::from("com", "mixed", "mixed") {
+    let is_test = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .map(|name| name.contains("test") || name.contains("mpris"))
+        .unwrap_or(false);
+
+    if is_test {
+        let mut path = std::env::temp_dir();
+        path.push("mixed_test_config.json");
+        path
+    } else if let Some(dir) = directories::ProjectDirs::from("", "", "mixed") {
         let mut path = dir.config_dir().to_path_buf();
         let _ = fs::create_dir_all(&path);
         path.push("config.json");

@@ -47,9 +47,37 @@ fn render_instructions(f: &mut Frame, area: Rect, panel: ActivePanel) {
 pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
+    // Screen-size guard: the layout requires at least 90 columns to render correctly.
+    // On narrow terminals (e.g., portrait Android Termux), show a friendly prompt
+    // instead of squashing the two-pane layout into an unusable sliver.
+    if size.width < 90 {
+        let msg = format!(
+            "This application is optimized for landscape mode.\n\n\
+             Current terminal: {} \u{00d7} {}\n\
+             Recommended: at least 90 \u{00d7} 30\n\n\
+             Please rotate your phone or increase the terminal width.",
+            size.width, size.height
+        );
+        let widget = ratatui::widgets::Paragraph::new(msg)
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(ratatui::style::Style::default().fg(C_ACCENT2));
+        f.render_widget(widget, size);
+        return;
+    }
+
     // If awaiting directory input, show the welcome screen
     if app.awaiting_dir_input {
         draw_dir_input(f, app, size);
+        return;
+    }
+
+    // If player is initializing, show loading screen
+    if app.player_loading {
+        let msg = "\n\nInitializing Audio Engine...\n\nPlease wait.";
+        let widget = ratatui::widgets::Paragraph::new(msg)
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(ratatui::style::Style::default().fg(C_ACCENT2));
+        f.render_widget(widget, size);
         return;
     }
 
@@ -263,7 +291,7 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
                     f,
                     area,
                     lyrics_data,
-                    app.player.elapsed_secs(),
+                    app.display_elapsed_secs(),
                     app.lyrics_scroll,
                 );
                 return;
@@ -279,7 +307,7 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
                         f,
                         area,
                         &data,
-                        app.player.elapsed_secs(),
+                        app.display_elapsed_secs(),
                         app.lyrics_scroll,
                     );
                 }
@@ -301,7 +329,7 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
                     f,
                     area,
                     lyrics_data,
-                    app.player.elapsed_secs(),
+                    app.display_elapsed_secs(),
                 );
                 return;
             }
@@ -316,7 +344,7 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
                         f,
                         area,
                         &data,
-                        app.player.elapsed_secs(),
+                        app.display_elapsed_secs(),
                     );
                 }
                 LyricsKind::Untimed(_) => {
@@ -332,21 +360,17 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
                         Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
                     f.render_widget(widget, area);
                 }
-                LyricsKind::None => {
-                    let hint = Paragraph::new(Line::from(Span::styled(
-                        "No Lyrics Available. Press 'm' to go back",
-                        Style::default().fg(C_DIM),
-                    )))
-                    .alignment(ratatui::layout::Alignment::Center);
-                    f.render_widget(hint, area);
-                }
+                LyricsKind::None => {}
             }
         }
     }
 }
 
 fn draw_visualizer(f: &mut Frame, app: &mut App, area: Rect) {
-    if let Ok(bars) = app.visualizer_bars.lock() {
+    // try_read() is non-blocking: if the FFT thread currently holds the write
+    // lock, we skip this frame rather than stalling the render loop (and
+    // indirectly blocking the audio decode path via mutex back-pressure).
+    if let Ok(bars) = app.visualizer_bars.try_read() {
         match app.visualizer_mode {
             VisualizerMode::Spectrum => {
                 let scaled: Vec<u16> = bars
@@ -378,8 +402,8 @@ fn draw_progress(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
     let active_area = padded_layout[1];
 
-    let elapsed_ms = app.player.elapsed_ms();
-    let total_ms = app.player.duration_ms();
+    let elapsed_ms = app.display_elapsed_ms();
+    let total_ms = app.player.as_ref().map(|p| p.duration_ms()).unwrap_or(0);
     let ratio = if total_ms > 0 {
         (elapsed_ms as f64 / total_ms as f64).min(1.0)
     } else {
@@ -401,11 +425,11 @@ fn draw_progress(f: &mut Frame, app: &App, area: Rect) {
         let elapsed_str = format_time(elapsed_ms);
         let total_str = format_time(total_ms);
         let pct = (ratio * 100.0) as u32;
-        let vol = app.player.volume();
+        let vol = app.player.as_ref().map(|p| p.volume()).unwrap_or(100);
         let repeat = app.playlist.repeat.symbol();
         let shuffle = if app.playlist.shuffle { "⤨" } else { "" };
 
-        let status = if app.player.is_paused() { "⏸" } else { "▶" };
+        let status = if app.player.as_ref().map(|p| p.is_paused()).unwrap_or(false) { "⏸" } else { "▶" };
         let bitrate_str = app
             .now_playing_meta
             .as_ref()
@@ -603,11 +627,7 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
             let entry_cursor_idx = idx + 1;
             let is_cursor = entry_cursor_idx == app.library_cursor;
 
-            let entry_files = entry.get_all_files();
-            let enqueued = !entry_files.is_empty()
-                && entry_files
-                    .iter()
-                    .all(|p| app.playlist.entry_paths.contains(p));
+            let enqueued = item.enqueued;
 
             let (icon, style) = if entry.is_dir() {
                 let is_collapsed = app.collapsed_dirs.contains(entry.path());
@@ -999,7 +1019,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Play/Pause icon
-    let status_icon = if app.player.is_paused() { "⏸" } else { "▶" };
+    let status_icon = if app.player.as_ref().map(|p| p.is_paused()).unwrap_or(false) { "⏸" } else { "▶" };
     spans.push(Span::raw("  "));
     spans.push(Span::styled(status_icon, Style::default().fg(C_ACCENT)));
 

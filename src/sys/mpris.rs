@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use zbus::{interface, Connection};
 
+use super::MediaCommand;
+
 #[derive(Debug, Clone, Default)]
 pub struct MprisMetadataStrings {
     pub title: String,
@@ -26,6 +28,8 @@ pub struct MprisState {
     pub can_play: AtomicBool,
     pub can_pause: AtomicBool,
     pub seek_target: AtomicI64, // -1 for none
+    /// Set to true by main thread to trigger graceful D-Bus name release.
+    pub shutdown: AtomicBool,
 
     pub metadata: RwLock<MprisMetadataStrings>,
 }
@@ -44,6 +48,7 @@ impl Default for MprisState {
             can_play: AtomicBool::new(false),
             can_pause: AtomicBool::new(false),
             seek_target: AtomicI64::new(-1),
+            shutdown: AtomicBool::new(false),
             metadata: RwLock::new(MprisMetadataStrings::default()),
         }
     }
@@ -51,23 +56,9 @@ impl Default for MprisState {
 
 pub type SharedMprisState = Arc<MprisState>;
 
-/// Commands from MPRIS to the player.
-#[derive(Debug, Clone)]
-pub enum MprisCommand {
-    PlayPause,
-    Play,
-    Pause,
-    Stop,
-    Next,
-    Previous,
-    Seek(i64),              // offset in microseconds
-    SetPosition(i64),       // absolute position in microseconds
-    SetLoopStatus(String),  // "None", "Track", "Playlist"
-    SetShuffle(bool),
-    SetVolume(f64),         // 0.0-1.0 per MPRIS spec
-    #[allow(dead_code)]
-    Quit,
-}
+/// Commands re-exported for backwards compat — use `super::MediaCommand` directly.
+#[allow(dead_code)]
+pub use super::MediaCommand as MprisCommand;
 
 /// MPRIS2 MediaPlayer2 root interface.
 struct MediaPlayer2Root;
@@ -123,11 +114,11 @@ impl MediaPlayer2Root {
 /// MPRIS2 Player interface.
 struct MediaPlayer2Player {
     state: SharedMprisState,
-    command_tx: crossbeam_channel::Sender<MprisCommand>,
+    command_tx: crossbeam_channel::Sender<MediaCommand>,
 }
 
 impl MediaPlayer2Player {
-    fn send_command(&self, cmd: MprisCommand) {
+    fn send_command(&self, cmd: MediaCommand) {
         if let Err(e) = self.command_tx.try_send(cmd) {
             eprintln!("MPRIS: failed to enqueue command: {:?}", e);
         }
@@ -138,28 +129,28 @@ impl MediaPlayer2Player {
 impl MediaPlayer2Player {
     // THIN ROUTER: Instantly send command and return. Do not lock or read state logic.
     fn next(&self) {
-        self.send_command(MprisCommand::Next);
+        self.send_command(MediaCommand::Next);
     }
     fn previous(&self) {
-        self.send_command(MprisCommand::Previous);
+        self.send_command(MediaCommand::Previous);
     }
     fn pause(&self) {
-        self.send_command(MprisCommand::Pause);
+        self.send_command(MediaCommand::Pause);
     }
     fn play_pause(&self) {
-        self.send_command(MprisCommand::PlayPause);
+        self.send_command(MediaCommand::PlayPause);
     }
     fn stop(&self) {
-        self.send_command(MprisCommand::Stop);
+        self.send_command(MediaCommand::Stop);
     }
     fn play(&self) {
-        self.send_command(MprisCommand::Play);
+        self.send_command(MediaCommand::Play);
     }
     fn seek(&self, offset: i64) {
-        self.send_command(MprisCommand::Seek(offset));
+        self.send_command(MediaCommand::Seek(offset));
     }
     fn set_position(&self, _track_id: zbus::zvariant::ObjectPath<'_>, position: i64) {
-        self.send_command(MprisCommand::SetPosition(position));
+        self.send_command(MediaCommand::SetPosition(position));
     }
 
     // ── Read properties ──────────────────────────────────────────────────────
@@ -185,7 +176,7 @@ impl MediaPlayer2Player {
     /// Writable: Linux Control Center / playerctl `loop` command hits this.
     #[zbus(property)]
     fn set_loop_status(&self, value: String) {
-        self.send_command(MprisCommand::SetLoopStatus(value));
+        self.send_command(MediaCommand::SetLoopStatus(value));
     }
 
     #[zbus(property)]
@@ -201,7 +192,7 @@ impl MediaPlayer2Player {
     /// Writable: toggle shuffle from media widget or `playerctl shuffle on`.
     #[zbus(property)]
     fn set_shuffle(&self, value: bool) {
-        self.send_command(MprisCommand::SetShuffle(value));
+        self.send_command(MediaCommand::SetShuffle(value));
     }
 
     #[zbus(property)]
@@ -253,7 +244,7 @@ impl MediaPlayer2Player {
         // Clamp to [0.0, 1.0]
         let clamped = value.max(0.0).min(1.0);
         self.state.volume.store(clamped.to_bits(), Ordering::Relaxed);
-        self.send_command(MprisCommand::SetVolume(clamped));
+        self.send_command(MediaCommand::SetVolume(clamped));
     }
 
     #[zbus(property)]
@@ -304,8 +295,10 @@ impl MediaPlayer2Player {
 
 /// Start the MPRIS2 D-Bus service on an isolated background Tokio runtime.
 /// Returns the shared state handle and a trigger transmitter to signal immediate property updates.
+/// The `SharedMprisState::shutdown` AtomicBool can be set to `true` to gracefully
+/// release the D-Bus name and terminate the background thread.
 pub fn start_mpris(
-    command_tx: crossbeam_channel::Sender<MprisCommand>,
+    command_tx: crossbeam_channel::Sender<MediaCommand>,
 ) -> (SharedMprisState, tokio::sync::mpsc::UnboundedSender<()>) {
     let state = Arc::new(MprisState::default());
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -386,9 +379,24 @@ pub fn start_mpris(
             let mut last_can_pause = false;
 
             loop {
-                // Wait for a notification from the UI thread (which implements a debouncer)
-                if update_rx.recv().await.is_none() {
-                    break; // Application is shutting down
+                // Wait for a notification OR a periodic shutdown-check tick.
+                // Using a select so the shutdown flag is polled even when no
+                // MPRIS updates are triggered (e.g., app quit without music).
+                let shutdown_requested = tokio::select! {
+                    result = update_rx.recv() => {
+                        if result.is_none() {
+                            // Channel closed — app is shutting down
+                            break;
+                        }
+                        false
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                        state_clone.shutdown.load(Ordering::Relaxed)
+                    }
+                };
+
+                if shutdown_requested {
+                    break; // Drop conn → D-Bus name released immediately
                 }
 
                 let mut seeked_val = None;

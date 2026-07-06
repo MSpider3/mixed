@@ -1,7 +1,7 @@
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rodio::{Decoder, OutputStream, Sink, Source};
@@ -11,7 +11,7 @@ use crossbeam_channel::{bounded, Sender};
 
 /// Commands sent to the background player thread.
 pub enum PlayerCmd {
-    Load(PathBuf),
+    Load { path: PathBuf, start_pos_ms: Option<u64> },
     Play,
     Pause,
     Seek(u64),
@@ -24,7 +24,9 @@ pub struct Player {
     cmd_tx: Sender<PlayerCmd>,
     pub sample_buffer: SharedSampleBuffer,
 
-    // Shared atomic states (synchronized via Relaxed ordering)
+    // Shared atomic states.
+    // State flags use Release/Acquire ordering to establish proper happens-before
+    // relationships across threads (important on non-TSO architectures like ARM).
     pub is_paused: Arc<AtomicBool>,
     pub is_playing: Arc<AtomicBool>,
     is_finished: Arc<AtomicBool>,
@@ -32,8 +34,6 @@ pub struct Player {
     elapsed_ms: Arc<AtomicU64>,
     total_duration_ms: Arc<AtomicU64>,
     current_sample_rate: Arc<AtomicU32>,
-    #[allow(dead_code)]
-    pub status_msg: Arc<Mutex<Option<String>>>,
 }
 
 impl Player {
@@ -47,7 +47,6 @@ impl Player {
         let elapsed_ms = Arc::new(AtomicU64::new(0));
         let total_duration_ms = Arc::new(AtomicU64::new(0));
         let current_sample_rate = Arc::new(AtomicU32::new(44100));
-        let status_msg = Arc::new(Mutex::new(None));
         let sample_buffer = new_shared_buffer(4096);
 
         let is_paused_clone = is_paused.clone();
@@ -57,7 +56,6 @@ impl Player {
         let elapsed_ms_clone = elapsed_ms.clone();
         let total_duration_ms_clone = total_duration_ms.clone();
         let current_sample_rate_clone = current_sample_rate.clone();
-        let status_msg_clone = status_msg.clone();
         let sample_buffer_clone = sample_buffer.clone();
 
         std::thread::spawn(move || {
@@ -70,11 +68,7 @@ impl Player {
 
             let (stream, handle) = match stream_res {
                 Some(s) => s,
-                None => {
-                    *status_msg_clone.lock().unwrap() =
-                        Some("Failed to open audio device".to_string());
-                    return;
-                }
+                None => return,
             };
 
             // Prevent stream from dropping immediately by keeping it in scope
@@ -83,22 +77,23 @@ impl Player {
             let sink_res = run_with_high_priority(|| Sink::try_new(&handle));
             let mut sink = match sink_res {
                 Ok(s) => s,
-                Err(e) => {
-                    *status_msg_clone.lock().unwrap() =
-                        Some(format!("Failed to create sink: {}", e));
-                    return;
-                }
+                Err(_) => return,
             };
             sink.set_volume(0.8);
 
             let mut start_instant: Option<Instant> = None;
             let mut accumulated_ms = 0u64;
+            let mut current_path: Option<PathBuf> = None;
+            let mut current_channels = 2u16;
+            let mut current_sample_rate = 44100u32;
+            let skip_request = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
             loop {
-                // Poll commands using crossbeam try_recv or recv_timeout to keep real-time constraints
+                // Poll commands; recv_timeout keeps real-time constraints
                 match cmd_rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                    Ok(PlayerCmd::Load(path)) => {
+                    Ok(PlayerCmd::Load { path, start_pos_ms }) => {
                         sink.stop();
+                        current_path = Some(path.clone());
                         let new_sink_res = run_with_high_priority(|| Sink::try_new(&handle));
                         match new_sink_res {
                             Ok(s) => {
@@ -110,8 +105,11 @@ impl Player {
                                     Ok(file) => {
                                         let reader = BufReader::new(file);
                                         match Decoder::new(reader) {
-                                            Ok(source) => {
+                                            Ok(mut source) => {
                                                 let sr = source.sample_rate();
+                                                let ch = source.channels();
+                                                current_sample_rate = sr;
+                                                current_channels = ch;
                                                 current_sample_rate_clone
                                                     .store(sr, Ordering::Relaxed);
                                                 let duration = source.total_duration();
@@ -129,35 +127,51 @@ impl Player {
                                                     buf.sample_rate = sr;
                                                 }
 
+                                                skip_request.store(0, Ordering::Release);
+
+                                                let mut actual_start_ms = 0;
+                                                if let Some(pos_ms) = start_pos_ms {
+                                                    if pos_ms > 0 {
+                                                        // Try native seek first on the decoder directly.
+                                                        if source.try_seek(std::time::Duration::from_millis(pos_ms)).is_ok() {
+                                                            actual_start_ms = pos_ms;
+                                                        } else {
+                                                            // Fallback to sample-dropping skip
+                                                            let samples_to_skip = (pos_ms as f64 / 1000.0 * sr as f64 * ch as f64) as u64;
+                                                            skip_request.store(samples_to_skip, Ordering::Release);
+                                                            actual_start_ms = pos_ms;
+                                                        }
+                                                    }
+                                                }
+
                                                 let viz_source = VisualizerSource::new(
                                                     source.convert_samples::<f32>(),
                                                     sample_buffer_clone.clone(),
+                                                    skip_request.clone(),
                                                 );
                                                 sink.append(viz_source);
                                                 sink.play();
 
-                                                accumulated_ms = 0;
+                                                accumulated_ms = actual_start_ms;
                                                 start_instant = Some(Instant::now());
-                                                is_paused_clone.store(false, Ordering::Relaxed);
-                                                is_playing_clone.store(true, Ordering::Relaxed);
-                                                is_finished_clone.store(false, Ordering::Relaxed);
-                                                *status_msg_clone.lock().unwrap() = None;
+                                                // Release ordering: these stores must be
+                                                // visible before cmd_rx receives the next msg
+                                                is_paused_clone.store(false, Ordering::Release);
+                                                is_playing_clone.store(true, Ordering::Release);
+                                                is_finished_clone.store(false, Ordering::Release);
                                             }
                                             Err(e) => {
-                                                *status_msg_clone.lock().unwrap() =
-                                                    Some(format!("Failed to decode: {}", e));
+                                                eprintln!("Failed to decode: {}", e);
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        *status_msg_clone.lock().unwrap() =
-                                            Some(format!("Failed to open file: {}", e));
+                                        eprintln!("Failed to open file: {}", e);
                                     }
                                 }
                             }
                             Err(e) => {
-                                *status_msg_clone.lock().unwrap() =
-                                    Some(format!("Failed to create sink: {}", e));
+                                eprintln!("Failed to create sink: {}", e);
                             }
                         }
                     }
@@ -165,16 +179,16 @@ impl Player {
                         if start_instant.is_none() {
                             sink.play();
                             start_instant = Some(Instant::now());
-                            is_paused_clone.store(false, Ordering::Relaxed);
-                            is_playing_clone.store(true, Ordering::Relaxed);
+                            is_paused_clone.store(false, Ordering::Release);
+                            is_playing_clone.store(true, Ordering::Release);
                         }
                     }
                     Ok(PlayerCmd::Pause) => {
                         if let Some(start) = start_instant.take() {
                             accumulated_ms += start.elapsed().as_millis() as u64;
                             sink.pause();
-                            is_paused_clone.store(true, Ordering::Relaxed);
-                            is_playing_clone.store(false, Ordering::Relaxed);
+                            is_paused_clone.store(true, Ordering::Release);
+                            is_playing_clone.store(false, Ordering::Release);
                         }
                     }
                     Ok(PlayerCmd::Seek(pos_ms)) => {
@@ -186,9 +200,74 @@ impl Player {
                                     start_instant = Some(Instant::now());
                                 }
                             }
-                            Err(e) => {
-                                *status_msg_clone.lock().unwrap() =
-                                    Some(format!("Seek failed: {:?}", e));
+                            Err(_) => {
+                                // Native seek failed. Implement hybrid seek.
+                                let running = if let Some(start) = &start_instant {
+                                    if !is_paused_clone.load(Ordering::Acquire) {
+                                        start.elapsed().as_millis() as u64
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                };
+                                let current_ms = accumulated_ms + running;
+                                if pos_ms >= current_ms {
+                                    // Forward seek: calculate samples to skip
+                                    let diff_ms = pos_ms - current_ms;
+                                    let channels = current_channels;
+                                    let sample_rate = current_sample_rate;
+                                    let samples_to_skip = (diff_ms as f64 / 1000.0 * sample_rate as f64 * channels as f64) as u64;
+
+                                    skip_request.fetch_add(samples_to_skip, Ordering::Release);
+
+                                    accumulated_ms = pos_ms;
+                                    if start_instant.is_some() {
+                                        start_instant = Some(Instant::now());
+                                    }
+                                } else {
+                                    // Backward seek: reopen and fast-forward
+                                    if let Some(ref path) = current_path {
+                                        sink.stop();
+                                        if let Ok(new_sink) = run_with_high_priority(|| Sink::try_new(&handle)) {
+                                            sink = new_sink;
+                                            let vol = volume_clone.load(Ordering::Relaxed);
+                                            sink.set_volume(vol as f32 / 100.0);
+
+                                            if let Ok(file) = std::fs::File::open(path) {
+                                                let reader = BufReader::new(file);
+                                                if let Ok(source) = Decoder::new(reader) {
+                                                    let sr = source.sample_rate();
+                                                    let ch = source.channels();
+                                                    current_sample_rate = sr;
+                                                    current_channels = ch;
+                                                    current_sample_rate_clone.store(sr, Ordering::Relaxed);
+
+                                                    skip_request.store(0, Ordering::Release);
+                                                    let samples_to_skip = (pos_ms as f64 / 1000.0 * sr as f64 * ch as f64) as u64;
+
+                                                    let viz_source = VisualizerSource::new(
+                                                        source.convert_samples::<f32>(),
+                                                        sample_buffer_clone.clone(),
+                                                        skip_request.clone(),
+                                                    );
+
+                                                    skip_request.store(samples_to_skip, Ordering::Release);
+
+                                                    sink.append(viz_source);
+                                                    if !is_paused_clone.load(Ordering::Acquire) {
+                                                        sink.play();
+                                                        start_instant = Some(Instant::now());
+                                                    } else {
+                                                        sink.pause();
+                                                        start_instant = None;
+                                                    }
+                                                    accumulated_ms = pos_ms;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -196,9 +275,9 @@ impl Player {
                         sink.stop();
                         start_instant = None;
                         accumulated_ms = 0;
-                        is_paused_clone.store(false, Ordering::Relaxed);
-                        is_playing_clone.store(false, Ordering::Relaxed);
-                        is_finished_clone.store(true, Ordering::Relaxed);
+                        is_paused_clone.store(false, Ordering::Release);
+                        is_playing_clone.store(false, Ordering::Release);
+                        is_finished_clone.store(true, Ordering::Release);
                     }
                     Ok(PlayerCmd::SetVolume(vol)) => {
                         sink.set_volume(vol as f32 / 100.0);
@@ -211,7 +290,7 @@ impl Player {
 
                 // Update elapsed tracking
                 let running = if let Some(start) = &start_instant {
-                    if !is_paused_clone.load(Ordering::Relaxed) {
+                    if !is_paused_clone.load(Ordering::Acquire) {
                         start.elapsed().as_millis() as u64
                     } else {
                         0
@@ -221,11 +300,11 @@ impl Player {
                 };
                 elapsed_ms_clone.store(accumulated_ms + running, Ordering::Relaxed);
 
-                // Update play state
+                // Update finished state
                 let finished = sink.empty();
-                is_finished_clone.store(finished, Ordering::Relaxed);
+                is_finished_clone.store(finished, Ordering::Release);
                 if finished {
-                    is_playing_clone.store(false, Ordering::Relaxed);
+                    is_playing_clone.store(false, Ordering::Release);
                 }
             }
         });
@@ -240,28 +319,36 @@ impl Player {
             elapsed_ms,
             total_duration_ms,
             current_sample_rate,
-            status_msg,
         })
     }
 
     pub fn load_track(&mut self, path: &Path) -> Result<(), String> {
-        self.is_paused.store(false, Ordering::Relaxed);
-        self.is_playing.store(true, Ordering::Relaxed);
-        self.is_finished.store(false, Ordering::Relaxed);
-        let _ = self.cmd_tx.send(PlayerCmd::Load(path.to_path_buf()));
+        self.load_track_with_pos(path, None)
+    }
+
+    pub fn load_track_with_pos(&mut self, path: &Path, start_pos_ms: Option<u64>) -> Result<(), String> {
+        self.is_paused.store(false, Ordering::Release);
+        self.is_playing.store(true, Ordering::Release);
+        self.is_finished.store(false, Ordering::Release);
+        let pos = start_pos_ms.unwrap_or(0);
+        self.elapsed_ms.store(pos, Ordering::Release);
+        let _ = self.cmd_tx.send(PlayerCmd::Load {
+            path: path.to_path_buf(),
+            start_pos_ms,
+        });
         Ok(())
     }
 
     pub fn play(&mut self) {
-        self.is_paused.store(false, Ordering::Relaxed);
-        self.is_playing.store(true, Ordering::Relaxed);
-        self.is_finished.store(false, Ordering::Relaxed);
+        self.is_paused.store(false, Ordering::Release);
+        self.is_playing.store(true, Ordering::Release);
+        self.is_finished.store(false, Ordering::Release);
         let _ = self.cmd_tx.send(PlayerCmd::Play);
     }
 
     pub fn pause(&mut self) {
-        self.is_paused.store(true, Ordering::Relaxed);
-        self.is_playing.store(false, Ordering::Relaxed);
+        self.is_paused.store(true, Ordering::Release);
+        self.is_playing.store(false, Ordering::Release);
         let _ = self.cmd_tx.send(PlayerCmd::Pause);
     }
 
@@ -279,22 +366,22 @@ impl Player {
     }
 
     pub fn stop(&mut self) {
-        self.is_paused.store(false, Ordering::Relaxed);
-        self.is_playing.store(false, Ordering::Relaxed);
-        self.is_finished.store(true, Ordering::Relaxed);
+        self.is_paused.store(false, Ordering::Release);
+        self.is_playing.store(false, Ordering::Release);
+        self.is_finished.store(true, Ordering::Release);
         let _ = self.cmd_tx.send(PlayerCmd::Stop);
     }
 
     pub fn is_playing(&self) -> bool {
-        self.is_playing.load(Ordering::Relaxed)
+        self.is_playing.load(Ordering::Acquire)
     }
 
     pub fn is_paused(&self) -> bool {
-        self.is_paused.load(Ordering::Relaxed)
+        self.is_paused.load(Ordering::Acquire)
     }
 
     pub fn is_finished(&self) -> bool {
-        self.is_finished.load(Ordering::Relaxed)
+        self.is_finished.load(Ordering::Acquire)
     }
 
     pub fn elapsed_ms(&self) -> u64 {

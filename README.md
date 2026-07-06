@@ -1,25 +1,147 @@
-# Mixed
+# mixed
 
-A next-generation terminal music player written in Rust.
-
+![Rust](https://img.shields.io/badge/Language-Rust-orange?logo=rust&logoColor=white)
+![Ratatui](https://img.shields.io/badge/TUI-Ratatui-blue?logo=terminal&logoColor=white)
+![Rodio](https://img.shields.io/badge/Audio-Rodio%20%2F%20Symphonia-purple?logo=audacity&logoColor=white)
+![Linux](https://img.shields.io/badge/Platform-Linux-green?logo=linux&logoColor=white)
+![Android Termux](https://img.shields.io/badge/Platform-Android%20Termux-brightgreen?logo=android&logoColor=white)
+![macOS](https://img.shields.io/badge/Platform-macOS-lightgrey?logo=apple&logoColor=white)
+![Windows](https://img.shields.io/badge/Platform-Windows-blue?logo=windows&logoColor=white)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-> [!NOTE]
-> This is a placeholder README. Detailed usage instructions, configuration reference, and architecture details will be documented soon.
+> A next-generation terminal music player — built with Rust, designed for performance freaks.
 
-## Features
+---
 
-- **TUI Interface**: High-performance rendering using `ratatui` and `crossterm`.
-- **Audio Playback**: Decode and play files using `symphonia` and `rodio`.
-- **System Integration**: Full MPRIS integration over D-Bus for desktop controls.
-- **Fuzzy Search**: Find and play tracks quickly.
+## Origin & Inspiration
+
+**mixed** is heavily inspired by the phenomenal C-based TUI player **[kew](https://github.com/ravachol/kew)**. `kew` is an incredible piece of software with elegant design and rock-solid audio playback. So why build another one?
+
+This project was born from a desire to push beyond what's possible with a C foundation:
+
+- **Design Overhaul** — A unique high-contrast **Neon-Noir / Material You** aesthetic with Sixel album art rendering, braille-dot visualizers, and a deeply customizable layout system.
+- **Lock-Free Concurrency** — All cross-thread state synchronization uses atomic primitives (`AtomicBool`, `AtomicU64`, `AtomicU8`) instead of mutexes, eliminating contention on the audio hot-path.
+- **Native Android Integration** — Asynchronous Termux widget control via Unix Domain Socket IPC, giving Android 13+ users lock-screen notification media buttons without rooting.
+- **High-Performance Rendering** — Sixel image pooling with XDG-cached cover art protocols, zero-allocation FFT spectrum frames, and an adaptive rendering loop that idles at 0% CPU when paused.
+
+**The Real Reason** - I started this project at the beginning of Janunary 2026 as part of my new year resolution that after learning rust of more than 6 months I will try to build a major project on my own in rust. *'kew'* was major inspiration to try build a minimilist music player with things I like (kew had everything I like), but I wanted to try build it on my own for practice.
+After 5 months the project was looking and working as intented with the plan and idea I had in mind, but there were many issue that I wasn't able to solve so I finanlly used AI for the help.
+but I'm proud that build almost 70-75% of the project on my own just using Google search, looking at other rust based music players, documentaions and the old way of wrtting code.
+But when I stuck for weeks without progess I finally used AI for helping and writting code. It didn't feel that good when I was working on the project myself but at the same time I was happy to finally see some progess on my stagnat project.
+
+---
+
+## Visual Showcase
+
+### Now Playing
+![Now Playing](docs/output.webp)
+
+### Library
+![Library Tab](docs/libary_tab.png)
+
+### Playlist
+![Playlist Tab](docs/playlist_tab.png)
+
+### Search
+![Search Tab](docs/search_tab.png)
+
+---
+
+## Core Features
+
+### 🔊 High-Performance Audio Engine
+Powered by **Rodio** and **Symphonia** with lock-free, zero-allocation sample tracking. Audio decoding runs on an isolated background thread with `nice(-10)` priority elevation on Linux. Sample data flows to the visualizer through a batched ring buffer (`BATCH_SIZE = 64`) that reduces mutex acquisitions by 64× compared to per-sample locking.
+
+### ⏩ Hybrid Seek System
+Bulletproof seeking that natively calls `try_seek()` on indexed audio formats (FLAC, WAV) and seamlessly falls back to a **sample-discarding iterator** for unseekable or variable-bitrate files (MP3, Ogg). Backward seeks gracefully reopen the decoder and fast-forward via atomic `skip_request` counters — no stalls, no glitches.
+
+### 📱 Cross-Platform Background Media Controls
+Full **MPRIS D-Bus** integration for Linux compositors (GNOME, KDE, Sway) with real-time `PropertiesChanged` signal emission for metadata, playback status, volume, shuffle, and loop state. On Android, a native **IPC proxy bridge** using `termux-notification` maps ⏮/⏯/⏭ button taps to Unix Domain Socket commands for lock-screen widget control.
+
+### ⚡ Zero-Spin Event Loop
+Intelligent, adaptive rendering powered by `crossbeam_channel::select!` multiplexing. The visualizer thread fires wake-up signals at **~30 fps** (34ms cadence) through a `bounded(1)` channel when music is playing. When idle, the FFT thread decays to silence and the main loop drops to **near 0% CPU** — no busy-waiting, no wasted cycles.
+
+### 📐 Responsive Screen Guard
+Dynamic terminal size checking that automatically shifts to a minimal portrait notification on narrow screens (e.g., phones in Termux). Resize events are debounced at 100ms to prevent thrashing, and Sixel cover art is re-scaled on every confirmed resize.
+
+---
 
 ## Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/mehulgolecha/mixed.git
+cd mixed
+
+# Build the optimized release binary
 cargo build --release
+
+# Run
+./target/release/mixed
 ```
+
+The release profile uses `opt-level = 3`, fat LTO, single codegen unit, and symbol stripping for maximum performance.
+
+---
+
+## Keybind Reference
+
+| Keybind | Action | Context |
+|---|---|---|
+| `Space` | Play / Pause | Playback |
+| `d` | Seek 5s Forward (Debounced) | Playback |
+| `a` | Seek 5s Backward (Debounced) | Playback |
+| `n` | Next Track | Playback |
+| `l` / `p` | Previous Track | Playback |
+| `+` / `-` | Volume Up / Down | Playback |
+| `s` | Toggle Shuffle | Playback |
+| `r` | Cycle Repeat Mode | Playback |
+| `v` | Toggle Visualizer Mode | Playback |
+| `Enter` | Play Selected / Enqueue | Queue / Library |
+| `Tab` / `BackTab` | Switch Active Layout Panels | Navigation |
+| `↑` / `↓` / `j` / `k` | Navigate Lists | Navigation |
+| `F2` / `F3` / `F5` / `F6` | Jump to Queue / Library / Search / Help | Views |
+| `q` / `Esc` | Graceful Exit (Releases D-Bus names & socket files) | System |
+
+### Help Panel
+![Help Tab](docs/help_tab.png)
+
+---
+
+## Future Roadmap
+
+- 🎵 **Spotify Integration** — Native account streaming with an ultra-minimalist layout interface that preserves the terminal-first experience.
+
+- 📺 **YouTube Music Integration** — Direct streaming playback mapped to background process queues, bringing the full YTM catalog into your terminal.
+
+- ☁️ **Cloud Streaming Architecture** — Universal hooks for streaming external media repositories without local cache bloat. Pluggable provider backends with a unified `Source` trait.
+
+- 🎨 **Theme Engine** — User-defined TOML theme files with hot-reload support for full color palette and layout customization.
+
+- 🔌 **Plugin System** — Lua/WASM-based extension API for community-built visualizers, metadata scrapers, and scrobbler integrations.
+
+---
+
+## Contributing
+
+Contributions are welcome and deeply appreciated! Whether it's a performance tweak, a bug fix, a new theme module, or a documentation improvement — every PR makes **mixed** better.
+
+**How to contribute:**
+
+1. **Open an Issue** — Found a bug or have a feature idea? Start by [opening an issue](../../issues) so we can discuss the approach.
+2. **Fork & Branch** — Fork the repository, create a feature branch (`feature/your-feature`), and develop your changes.
+3. **Submit a Pull Request** — Open a PR against `main` with a clear description of your changes. Include screenshots for UI changes and benchmark numbers for performance work.
+
+**Areas where help is especially welcome:**
+- 🐧 **Platform testing** — macOS, Windows, and exotic terminal emulators
+- 🎨 **Theme contributions** — Custom color palettes and layout presets
+- 🌐 **Internationalization** — Non-ASCII filename handling edge cases
+- 📊 **Performance profiling** — Flamegraphs, memory analysis, latency benchmarks
+
+---
 
 ## License
 
-This project is licensed under the GPL-3.0 License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the **GNU General Public License v3.0** — see the [LICENSE](LICENSE) file for details.
+
+`mixed` is free software: you can redistribute it and/or modify it under the terms of the GNU GPL as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.

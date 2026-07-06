@@ -22,7 +22,8 @@ fn test_first_run_flow_and_navigation() {
     config.music_dir = None; // Start in first-run directory input mode
 
     let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
-    let mut app = App::new(config, mpris_cmd_tx);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
 
     assert!(app.awaiting_dir_input);
 
@@ -92,7 +93,8 @@ fn test_layout_boundary_robustness() {
     config.music_dir = Some("/mock/music".to_string());
 
     let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
-    let mut app = App::new(config, mpris_cmd_tx);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
     app.awaiting_dir_input = false;
 
     // Test a matrix of terminal sizes down to 0x0
@@ -182,7 +184,6 @@ fn test_mpris_bridge_concurrency_stress() {
         thread.join().unwrap();
     }
 
-    // Check the final state
     assert!(
         mpris_state
             .position_us

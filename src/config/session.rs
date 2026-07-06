@@ -37,10 +37,10 @@ impl Default for SessionState {
     }
 }
 
-/// Returns the path to the session file.
+/// Returns the path to the session state file using XDG/platform-appropriate data directory.
 pub fn session_file_path() -> Option<PathBuf> {
-    let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
-    let state_dir = home.join(".local/state/mixed");
+    let proj = directories::ProjectDirs::from("", "", "mixed")?;
+    let state_dir = proj.data_local_dir().to_path_buf();
     fs::create_dir_all(&state_dir).ok()?;
     Some(state_dir.join("state.json"))
 }

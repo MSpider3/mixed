@@ -9,6 +9,28 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         return false;
     }
 
+    // Loading guard: while the audio engine is initializing on a background thread,
+    // only allow safe keys (quit, navigation, search panel). All playback-related
+    // keys are silently swallowed — no panic, no queuing.
+    if app.player_loading && !app.awaiting_dir_input && !app.searching {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => return true,
+            KeyCode::Tab => app.next_panel(),
+            KeyCode::BackTab => app.prev_panel(),
+            KeyCode::F(2) => app.active_panel = ActivePanel::Queue,
+            KeyCode::F(3) => app.active_panel = ActivePanel::Library,
+            KeyCode::F(5) => {
+                app.active_panel = ActivePanel::Search;
+                app.searching = true;
+                app.search_query.clear();
+            }
+            KeyCode::F(6) => app.active_panel = ActivePanel::Help,
+            _ => {} // swallow all other keys silently
+        }
+        app.refresh_needed = true;
+        return false;
+    }
+
     // If the user presses F2-F6 or Tab/BackTab, turn off search immediately
     match key.code {
         KeyCode::F(2)
@@ -32,6 +54,7 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
     if app.awaiting_dir_input {
         return handle_dir_input(app, key);
     }
+
 
     match key.code {
         // Global quit
@@ -87,12 +110,22 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             app.stop();
         }
         KeyCode::Char('a') => {
-            let target = app.player.elapsed_ms().saturating_sub(5000);
-            app.seek(target);
+            let starting_position = app.pending_seek
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or_else(|| app.player().map(|p| p.elapsed_ms()).unwrap_or(0));
+            let target = starting_position.saturating_sub(5000);
+            app.pending_seek = Some(std::time::Duration::from_millis(target));
+            app.last_seek_input = Some(std::time::Instant::now());
+            app.refresh_needed = true;
         }
         KeyCode::Char('d') => {
-            let target = (app.player.elapsed_ms() + 5000).min(app.player.duration_ms());
-            app.seek(target);
+            let starting_position = app.pending_seek
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or_else(|| app.player().map(|p| p.elapsed_ms()).unwrap_or(0));
+            let target = (starting_position + 5000).min(app.player().map(|p| p.duration_ms()).unwrap_or(0));
+            app.pending_seek = Some(std::time::Duration::from_millis(target));
+            app.last_seek_input = Some(std::time::Instant::now());
+            app.refresh_needed = true;
         }
         KeyCode::Char('+') | KeyCode::Char('=') => app.volume_up(),
         KeyCode::Char('-') | KeyCode::Char('[') => app.volume_down(),
@@ -121,7 +154,7 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Char('G') => {
             handle_enter(app);
         }
-        KeyCode::Char('o') => {
+        KeyCode::Char('o') | KeyCode::Char('O') => {
             if app.active_panel == ActivePanel::Library && app.library_cursor > 0 {
                 let idx = app.library_cursor - 1;
                 if idx < app.flat_library.len() {
@@ -134,6 +167,7 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
                             app.collapse_dir(path);
                         }
                         app.refresh_needed = true;
+                        return false;
                     }
                 }
             }
@@ -331,6 +365,7 @@ fn handle_delete(app: &mut App) {
         if is_current {
             app.play_current();
         }
+        app.rebuild_flat_library_view();
     }
 }
 

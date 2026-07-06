@@ -166,11 +166,11 @@ pub fn read_metadata(path: &Path) -> TrackMetadata {
             }
         }
 
-        // Extract cover art
-        for pic in tag.pictures() {
-            meta.cover_art = Some(pic.data().to_vec());
-            break; // Take the first picture
-        }
+        // Cover art is intentionally NOT loaded here.
+        // read_metadata is called for every track during library scanning.
+        // Storing Vec<u8> JPEG/PNG blobs for a large library (1000+ tracks)
+        // can consume gigabytes of RAM. Cover art is loaded lazily at play-time
+        // by calling read_cover_art() only for the currently playing track.
     }
 
     if let Some(ref title) = meta.title {
@@ -178,6 +178,20 @@ pub fn read_metadata(path: &Path) -> TrackMetadata {
     }
 
     meta
+}
+
+/// Reads ONLY the cover art bytes for a specific track path.
+/// Called lazily at play-time — never during library scanning.
+pub fn read_cover_art(path: &Path) -> Option<Vec<u8>> {
+    let tagged = Probe::open(path).and_then(|p| p.read()).ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    for pic in tag.pictures() {
+        let data = pic.data();
+        if !data.is_empty() {
+            return Some(data.to_vec());
+        }
+    }
+    None
 }
 
 /// Parses embedded timed lyrics (LRC format within tags).
