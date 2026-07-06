@@ -174,15 +174,15 @@ The release profile uses `opt-level = 3`, fat LTO, single codegen unit, and symb
 
 ## Future Roadmap
 
-- 🎵 **Spotify Integration** — Native account streaming with an ultra-minimalist layout interface that preserves the terminal-first experience.
+- [ ] 🎵 **Spotify Integration** — Native account streaming with an ultra-minimalist layout interface that preserves the terminal-first experience.
 
-- 📺 **YouTube Music Integration** — Direct streaming playback mapped to background process queues, bringing the full YTM catalog into your terminal.
+- [ ] 📺 **YouTube Music Integration** — Direct streaming playback mapped to background process queues, bringing the full YTM catalog into your terminal.
 
-- ☁️ **Cloud Streaming Architecture** — Universal hooks for streaming external media repositories without local cache bloat. Pluggable provider backends with a unified `Source` trait.
+- [ ] ☁️ **Cloud Streaming Architecture** — Universal hooks for streaming external media repositories without local cache bloat. Pluggable provider backends with a unified `Source` trait.
 
-- 🎨 **Theme Engine** — User-defined TOML theme files with hot-reload support for full color palette and layout customization.
+- [ ] 🎨 **Theme Engine** — User-defined TOML theme files with hot-reload support for full color palette and layout customization.
 
-- 🔌 **Plugin System** — Lua/WASM-based extension API for community-built visualizers, metadata scrapers, and scrobbler integrations.
+- [ ] 🔌 **Plugin System** — Lua/WASM-based extension API for community-built visualizers, metadata scrapers, and scrobbler integrations.
 
 ---
 
