@@ -64,6 +64,12 @@ Intelligent, adaptive rendering powered by `crossbeam_channel::select!` multiple
 ### 📐 Responsive Screen Guard
 Dynamic terminal size checking that automatically shifts to a minimal portrait notification on narrow screens (e.g., phones in Termux). Resize events are debounced at 100ms to prevent thrashing, and Sixel cover art is re-scaled on every confirmed resize.
 
+### 🎨 Native Terminal Theme Integration
+**mixed** inherits standard ANSI color palette codes and uses `Color::Reset` for default text. This means the player automatically respects and adapts to your terminal emulator's custom theme (e.g. Catppuccin, Gruvbox, Nord, Dracula) for a consistent, native desktop look.
+
+### 🖼 Sixel & Kitty Cover Art
+Album art is rendered directly in the terminal using high-performance image protocols (Sixel and Kitty Graphics Protocol) powered by `ratatui-image`. To see high-resolution cover art, use an image-enabled terminal emulator such as Kitty, WezTerm, Foot, Konsole, or Alacritty (v0.14+ with Sixel support enabled). The player automatically falls back to a text placeholder if image protocols are unsupported.
+
 ---
 
 ## Installation
