@@ -73,10 +73,10 @@ Dynamic terminal size checking that automatically shifts to a minimal portrait n
 You can download the pre-compiled binary for your system from the **[Releases](../../releases)** page.
 
 #### Linux (x86_64)
-1. Download `mixed-v<version>-x86_64-unknown-linux-gnu.tar.gz`.
+1. Download `mixed-v0.1.2-x86_64-unknown-linux-gnu.tar.gz`.
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v*.tar.gz
+   tar -xzf mixed-v0.1.2-x86_64-unknown-linux-gnu.tar.gz
    ```
 3. Move the `mixed` binary to your system PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -85,10 +85,10 @@ You can download the pre-compiled binary for your system from the **[Releases](.
 4. Run the player by typing `mixed` in your terminal.
 
 #### macOS (Apple Silicon or Intel)
-1. Download either `mixed-v<version>-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v<version>-x86_64-apple-darwin.tar.gz` (Intel).
+1. Download either `mixed-v0.1.2-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v0.1.2-x86_64-apple-darwin.tar.gz` (Intel).
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v*.tar.gz
+   tar -xzf mixed-v0.1.2-*.tar.gz
    ```
 3. Move `mixed` to a directory in your PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -100,7 +100,7 @@ You can download the pre-compiled binary for your system from the **[Releases](.
    ```
 
 #### Windows (x86_64)
-1. Download `mixed-v<version>-x86_64-pc-windows-msvc.zip`.
+1. Download `mixed-v0.1.2-x86_64-pc-windows-msvc.zip`.
 2. Extract the `.zip` file.
 3. Move `mixed.exe` to a folder of your choice and run it in a terminal emulator (PowerShell, Command Prompt, or Git Bash).
 
@@ -110,10 +110,10 @@ You can download the pre-compiled binary for your system from the **[Releases](.
    pkg install termux-api
    ```
 2. Make sure you have the **Termux:API** application installed from F-Droid to enable widget interactions.
-3. Download `mixed-v<version>-aarch64-linux-android.tar.gz`.
+3. Download `mixed-v0.1.2-aarch64-linux-android.tar.gz`.
 4. Extract the binary inside Termux and make it executable:
    ```bash
-   tar -xzf mixed-v*.tar.gz
+   tar -xzf mixed-v0.1.2-aarch64-linux-android.tar.gz
    chmod +x mixed
    mv mixed $PREFIX/bin/
    ```
@@ -126,7 +126,7 @@ If you have Rust and Cargo installed:
 
 ```bash
 # Clone the repository
-git clone https://github.com/mehulgolecha/mixed.git
+git clone https://github.com/MSpider3/mixed.git
 cd mixed
 
 # Build the optimized release binary
@@ -144,20 +144,28 @@ The release profile uses `opt-level = 3`, fat LTO, single codegen unit, and symb
 
 | Keybind | Action | Context |
 |---|---|---|
-| `Space` | Play / Pause | Playback |
-| `d` | Seek 5s Forward (Debounced) | Playback |
-| `a` | Seek 5s Backward (Debounced) | Playback |
-| `n` | Next Track | Playback |
-| `l` / `p` | Previous Track | Playback |
-| `+` / `-` | Volume Up / Down | Playback |
-| `s` | Toggle Shuffle | Playback |
-| `r` | Cycle Repeat Mode | Playback |
-| `v` | Toggle Visualizer Mode | Playback |
-| `Enter` | Play Selected / Enqueue | Queue / Library |
-| `Tab` / `BackTab` | Switch Active Layout Panels | Navigation |
-| `↑` / `↓` / `j` / `k` | Navigate Lists | Navigation |
-| `F2` / `F3` / `F5` / `F6` | Jump to Queue / Library / Search / Help | Views |
-| `q` / `Esc` | Graceful Exit (Releases D-Bus names & socket files) | System |
+| `F2 - F6` | Switch views (Queue/Library/Now Playing/Search/Help) | Navigation |
+| `Tab` / `Shift+Tab` | Cycle active panel / view | Navigation |
+| `k` / `j` / `↑` / `↓` | Scroll / Navigate list items | Navigation |
+| `q` / `Esc` | Quit / Graceful Exit | System |
+| `Space` / `p` | Play / Pause toggle | Playback |
+| `S` | Stop playback | Playback |
+| `n` / `l` / `→` | Next track | Playback |
+| `p` / `h` / `←` | Previous track | Playback |
+| `a` / `d` | Seek backward / forward 5 seconds | Playback |
+| `+` / `=` | Volume up | Playback |
+| `-` / `[` | Volume down | Playback |
+| `s` | Toggle shuffle mode | Playback |
+| `r` | Cycle repeat mode (off → track → queue) | Playback |
+| `Enter` | Enqueue selected item / Play selected queue item | Queue / Library |
+| `Alt + Enter` | Enqueue selected item and play immediately | Queue / Library |
+| `o` / `←` / `→` | Toggle / Collapse/Expand directory tree | Library |
+| `Delete` | Remove selected track from the queue | Queue |
+| `Backspace` | Clear the entire queue (stops playback) | Queue |
+| `f` / `g` | Move selected queue item up / down | Queue |
+| `/` | Open search prompt to filter library | Library |
+| `v` | Toggle spectrum/braille visualizer mode | Display |
+| `m` | Toggle full lyrics / 3-line timed lyrics view | Display |
 
 ### Help Panel
 ![Help Tab](docs/help_tab.png)
