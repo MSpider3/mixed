@@ -243,7 +243,9 @@ impl MediaPlayer2Player {
     fn set_volume(&self, value: f64) {
         // Clamp to [0.0, 1.0]
         let clamped = value.clamp(0.0, 1.0);
-        self.state.volume.store(clamped.to_bits(), Ordering::Relaxed);
+        self.state
+            .volume
+            .store(clamped.to_bits(), Ordering::Relaxed);
         self.send_command(MediaCommand::SetVolume(clamped));
     }
 
@@ -526,8 +528,7 @@ pub fn start_mpris(
                         // Emit PropertiesChanged for Position so all clients pick it up
                         let mut seeked_changed: HashMap<&str, zbus::zvariant::Value<'_>> =
                             HashMap::new();
-                        seeked_changed
-                            .insert("Position", zbus::zvariant::Value::from(pos));
+                        seeked_changed.insert("Position", zbus::zvariant::Value::from(pos));
                         let _ = emitter
                             .emit(
                                 "org.freedesktop.DBus.Properties",

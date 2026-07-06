@@ -443,7 +443,7 @@ mod tests {
         assert!(!playlist.can_go_next());
         assert!(!playlist.can_go_previous());
     }
-    
+
     #[test]
     fn navigation_capabilities_follow_play_order_and_repeat() {
         let mut playlist = Playlist::new();

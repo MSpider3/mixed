@@ -108,10 +108,7 @@ pub fn render_spectrum(f: &mut Frame, area: Rect, bars: &[u16], max_height: u16)
                 cache.as_ref().unwrap().1[ch_idx].clone()
             });
 
-            spans.push(Span::styled(
-                ch_str,
-                Style::default().fg(color),
-            ));
+            spans.push(Span::styled(ch_str, Style::default().fg(color)));
 
             if gap_width > 0 && bar_idx < num_bars - 1 {
                 spans.push(Span::raw(" "));

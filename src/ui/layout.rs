@@ -429,7 +429,11 @@ fn draw_progress(f: &mut Frame, app: &App, area: Rect) {
         let repeat = app.playlist.repeat.symbol();
         let shuffle = if app.playlist.shuffle { "⤨" } else { "" };
 
-        let status = if app.player.as_ref().map(|p| p.is_paused()).unwrap_or(false) { "⏸" } else { "▶" };
+        let status = if app.player.as_ref().map(|p| p.is_paused()).unwrap_or(false) {
+            "⏸"
+        } else {
+            "▶"
+        };
         let bitrate_str = app
             .now_playing_meta
             .as_ref()
@@ -1015,7 +1019,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Play/Pause icon
-    let status_icon = if app.player.as_ref().map(|p| p.is_paused()).unwrap_or(false) { "⏸" } else { "▶" };
+    let status_icon = if app.player.as_ref().map(|p| p.is_paused()).unwrap_or(false) {
+        "⏸"
+    } else {
+        "▶"
+    };
     spans.push(Span::raw("  "));
     spans.push(Span::styled(status_icon, Style::default().fg(C_ACCENT)));
 

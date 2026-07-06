@@ -11,7 +11,10 @@ use crossbeam_channel::{bounded, Sender};
 
 /// Commands sent to the background player thread.
 pub enum PlayerCmd {
-    Load { path: PathBuf, start_pos_ms: Option<u64> },
+    Load {
+        path: PathBuf,
+        start_pos_ms: Option<u64>,
+    },
     Play,
     Pause,
     Seek(u64),
@@ -133,12 +136,26 @@ impl Player {
                                                 if let Some(pos_ms) = start_pos_ms {
                                                     if pos_ms > 0 {
                                                         // Try native seek first on the decoder directly.
-                                                        if source.try_seek(std::time::Duration::from_millis(pos_ms)).is_ok() {
+                                                        if source
+                                                            .try_seek(
+                                                                std::time::Duration::from_millis(
+                                                                    pos_ms,
+                                                                ),
+                                                            )
+                                                            .is_ok()
+                                                        {
                                                             actual_start_ms = pos_ms;
                                                         } else {
                                                             // Fallback to sample-dropping skip
-                                                            let samples_to_skip = (pos_ms as f64 / 1000.0 * sr as f64 * ch as f64) as u64;
-                                                            skip_request.store(samples_to_skip, Ordering::Release);
+                                                            let samples_to_skip = (pos_ms as f64
+                                                                / 1000.0
+                                                                * sr as f64
+                                                                * ch as f64)
+                                                                as u64;
+                                                            skip_request.store(
+                                                                samples_to_skip,
+                                                                Ordering::Release,
+                                                            );
                                                             actual_start_ms = pos_ms;
                                                         }
                                                     }
@@ -217,7 +234,10 @@ impl Player {
                                     let diff_ms = pos_ms - current_ms;
                                     let channels = current_channels;
                                     let sample_rate = current_sample_rate;
-                                    let samples_to_skip = (diff_ms as f64 / 1000.0 * sample_rate as f64 * channels as f64) as u64;
+                                    let samples_to_skip = (diff_ms as f64 / 1000.0
+                                        * sample_rate as f64
+                                        * channels as f64)
+                                        as u64;
 
                                     skip_request.fetch_add(samples_to_skip, Ordering::Release);
 
@@ -229,7 +249,9 @@ impl Player {
                                     // Backward seek: reopen and fast-forward
                                     if let Some(ref path) = current_path {
                                         sink.stop();
-                                        if let Ok(new_sink) = run_with_high_priority(|| Sink::try_new(&handle)) {
+                                        if let Ok(new_sink) =
+                                            run_with_high_priority(|| Sink::try_new(&handle))
+                                        {
                                             sink = new_sink;
                                             let vol = volume_clone.load(Ordering::Relaxed);
                                             sink.set_volume(vol as f32 / 100.0);
@@ -241,10 +263,14 @@ impl Player {
                                                     let ch = source.channels();
                                                     current_sample_rate = sr;
                                                     current_channels = ch;
-                                                    current_sample_rate_clone.store(sr, Ordering::Relaxed);
+                                                    current_sample_rate_clone
+                                                        .store(sr, Ordering::Relaxed);
 
                                                     skip_request.store(0, Ordering::Release);
-                                                    let samples_to_skip = (pos_ms as f64 / 1000.0 * sr as f64 * ch as f64) as u64;
+                                                    let samples_to_skip = (pos_ms as f64 / 1000.0
+                                                        * sr as f64
+                                                        * ch as f64)
+                                                        as u64;
 
                                                     let viz_source = VisualizerSource::new(
                                                         source.convert_samples::<f32>(),
@@ -252,7 +278,8 @@ impl Player {
                                                         skip_request.clone(),
                                                     );
 
-                                                    skip_request.store(samples_to_skip, Ordering::Release);
+                                                    skip_request
+                                                        .store(samples_to_skip, Ordering::Release);
 
                                                     sink.append(viz_source);
                                                     if !is_paused_clone.load(Ordering::Acquire) {
@@ -326,7 +353,11 @@ impl Player {
         self.load_track_with_pos(path, None)
     }
 
-    pub fn load_track_with_pos(&mut self, path: &Path, start_pos_ms: Option<u64>) -> Result<(), String> {
+    pub fn load_track_with_pos(
+        &mut self,
+        path: &Path,
+        start_pos_ms: Option<u64>,
+    ) -> Result<(), String> {
         self.is_paused.store(false, Ordering::Release);
         self.is_playing.store(true, Ordering::Release);
         self.is_finished.store(false, Ordering::Release);

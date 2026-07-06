@@ -35,9 +35,7 @@ mod duration_millis {
         d.map(|dur| dur.as_millis() as u64).serialize(s)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<Option<Duration>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
         let millis: Option<u64> = Option::deserialize(d)?;
         Ok(millis.map(Duration::from_millis))
     }
@@ -64,7 +62,6 @@ pub struct TrackMetadata {
     pub sample_rate: Option<u32>,
     pub bitrate: Option<u32>,
 }
-
 
 impl TrackMetadata {
     /// Returns the display title, falling back to the filename stem.

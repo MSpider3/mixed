@@ -89,7 +89,11 @@ impl<S> VisualizerSource<S>
 where
     S: Source<Item = f32>,
 {
-    pub fn new(source: S, buffer: SharedSampleBuffer, skip_request: Arc<std::sync::atomic::AtomicU64>) -> Self {
+    pub fn new(
+        source: S,
+        buffer: SharedSampleBuffer,
+        skip_request: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
         let channels = source.channels();
         Self {
             inner: source,

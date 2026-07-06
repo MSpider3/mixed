@@ -22,7 +22,8 @@ use super::MediaCommand;
 /// Returns the Unix domain socket path, honouring Termux's $PREFIX layout.
 /// Falls back to /tmp if $PREFIX is not set (shouldn't happen in Termux).
 fn socket_path() -> PathBuf {
-    let prefix = std::env::var("PREFIX").unwrap_or_else(|_| "/data/data/com.termux/files/usr".into());
+    let prefix =
+        std::env::var("PREFIX").unwrap_or_else(|_| "/data/data/com.termux/files/usr".into());
     PathBuf::from(format!("{}/tmp/mixed.sock", prefix))
 }
 
@@ -48,24 +49,35 @@ impl AndroidMediaHandle {
         let artist = shell_escape(artist);
 
         // Build button actions that write commands to the socket
-        let prev_action   = format!("echo prev > '{sock}'");
-        let pp_action     = format!("echo playpause > '{sock}'");
-        let next_action   = format!("echo next > '{sock}'");
+        let prev_action = format!("echo prev > '{sock}'");
+        let pp_action = format!("echo playpause > '{sock}'");
+        let next_action = format!("echo next > '{sock}'");
         let delete_action = format!("echo quit > '{sock}'");
 
         let _ = std::process::Command::new("termux-notification")
             .args([
-                "--id",            "mixed_player",
-                "--type",          "media",
-                "--title",         &title,
-                "--content",       &artist,
-                "--button1",       "⏮",
-                "--button1-action", &prev_action,
-                "--button2",       "⏯",
-                "--button2-action", &pp_action,
-                "--button3",       "⏭",
-                "--button3-action", &next_action,
-                "--on-delete",     &delete_action,
+                "--id",
+                "mixed_player",
+                "--type",
+                "media",
+                "--title",
+                &title,
+                "--content",
+                &artist,
+                "--button1",
+                "⏮",
+                "--button1-action",
+                &prev_action,
+                "--button2",
+                "⏯",
+                "--button2-action",
+                &pp_action,
+                "--button3",
+                "⏭",
+                "--button3-action",
+                &next_action,
+                "--on-delete",
+                &delete_action,
             ])
             .spawn();
     }
@@ -141,13 +153,13 @@ pub fn start_android_media(
 
                         let cmd = match cmd_str.as_str() {
                             "playpause" => Some(MediaCommand::PlayPause),
-                            "play"      => Some(MediaCommand::Play),
-                            "pause"     => Some(MediaCommand::Pause),
-                            "next"      => Some(MediaCommand::Next),
+                            "play" => Some(MediaCommand::Play),
+                            "pause" => Some(MediaCommand::Pause),
+                            "next" => Some(MediaCommand::Next),
                             "prev" | "previous" => Some(MediaCommand::Previous),
-                            "stop"      => Some(MediaCommand::Stop),
-                            "quit"      => Some(MediaCommand::Quit),
-                            _           => None,
+                            "stop" => Some(MediaCommand::Stop),
+                            "quit" => Some(MediaCommand::Quit),
+                            _ => None,
                         };
 
                         if let Some(c) = cmd {

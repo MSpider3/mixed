@@ -15,13 +15,17 @@ fn get_cell_aspect_ratio() -> f32 {
             ws_ypixel: 0,
         };
         if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0
-            && ws.ws_col > 0 && ws.ws_row > 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0 {
-                let cell_w = ws.ws_xpixel / ws.ws_col;
-                let cell_h = ws.ws_ypixel / ws.ws_row;
-                if cell_w > 0 && cell_h > 0 {
-                    return (cell_h as f32) / (cell_w as f32);
-                }
+            && ws.ws_col > 0
+            && ws.ws_row > 0
+            && ws.ws_xpixel > 0
+            && ws.ws_ypixel > 0
+        {
+            let cell_w = ws.ws_xpixel / ws.ws_col;
+            let cell_h = ws.ws_ypixel / ws.ws_row;
+            if cell_w > 0 && cell_h > 0 {
+                return (cell_h as f32) / (cell_w as f32);
             }
+        }
     }
     2.0 // fallback
 }

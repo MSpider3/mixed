@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::io::stdout(),
             crossterm::terminal::LeaveAlternateScreen,
             crossterm::event::DisableMouseCapture,
-            crossterm::cursor::Show,  // restore cursor visibility
+            crossterm::cursor::Show, // restore cursor visibility
         );
         original_hook(info);
     }));
@@ -298,7 +298,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
         if let Some(ref state) = app.mpris_state {
-            state.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            state
+                .shutdown
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         // Close the update channel so recv() in the tokio loop returns None
         drop(app.mpris_update_tx.take());
@@ -330,20 +332,27 @@ fn silence_alsa() {
         if !lib.is_null() {
             let set_handler = libc::dlsym(lib, c"snd_lib_error_set_handler".as_ptr());
             if !set_handler.is_null() {
-                type HandlerFn = unsafe extern "C" fn(*const libc::c_char, libc::c_int, *const libc::c_char, libc::c_int, *const libc::c_char);
-                let set_handler_fn: unsafe extern "C" fn(Option<HandlerFn>) -> libc::c_int = std::mem::transmute(set_handler);
-                
+                type HandlerFn = unsafe extern "C" fn(
+                    *const libc::c_char,
+                    libc::c_int,
+                    *const libc::c_char,
+                    libc::c_int,
+                    *const libc::c_char,
+                );
+                let set_handler_fn: unsafe extern "C" fn(Option<HandlerFn>) -> libc::c_int =
+                    std::mem::transmute(set_handler);
+
                 unsafe extern "C" fn dummy_handler(
                     _file: *const libc::c_char,
                     _line: libc::c_int,
                     _function: *const libc::c_char,
                     _err: libc::c_int,
                     _fmt: *const libc::c_char,
-                ) {}
-                
+                ) {
+                }
+
                 let _ = set_handler_fn(Some(dummy_handler));
             }
         }
     }
 }
-

@@ -126,7 +126,11 @@ impl LibraryEntry {
 fn is_audio_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| AUDIO_EXTENSIONS.iter().any(|&ext| e.eq_ignore_ascii_case(ext)))
+        .map(|e| {
+            AUDIO_EXTENSIONS
+                .iter()
+                .any(|&ext| e.eq_ignore_ascii_case(ext))
+        })
         .unwrap_or(false)
 }
 
@@ -206,10 +210,8 @@ pub fn scan_library(root: &Path, strip_track_numbers: bool) -> Vec<LibraryEntry>
 
     // ── Phase 2: Parallel metadata reads (rayon) ─────────────────────────────
     // Each track path is processed independently — no shared state, no locks.
-    let metadata_vec: Vec<crate::data::metadata::TrackMetadata> = audio_paths
-        .par_iter()
-        .map(|p| read_metadata(p))
-        .collect();
+    let metadata_vec: Vec<crate::data::metadata::TrackMetadata> =
+        audio_paths.par_iter().map(|p| read_metadata(p)).collect();
 
     // Build O(1) path→metadata lookup. `remove` later avoids cloning metadata.
     let mut path_to_meta: HashMap<PathBuf, crate::data::metadata::TrackMetadata> =

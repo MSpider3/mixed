@@ -10,9 +10,9 @@ use crate::data::library::{self, LibraryEntry};
 use crate::data::lyrics::{self, LyricsData};
 use crate::data::metadata::{self, TrackMetadata};
 use crate::data::playlist::{Playlist, RepeatMode};
-use crate::sys::MediaCommand;
 #[cfg(target_os = "linux")]
 use crate::sys::mpris::{self, SharedMprisState};
+use crate::sys::MediaCommand;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -185,8 +185,6 @@ impl App {
             // Always rescan in background to pick up added/removed files
             app.scan_library(dir);
         }
-
-
 
         // Start MPRIS (Linux only)
         #[cfg(target_os = "linux")]
@@ -418,7 +416,9 @@ impl App {
                 self.playlist.current = state.current_index.min(self.playlist.len() - 1);
                 self.playlist.repeat = state.repeat_mode;
                 self.playlist.set_shuffle(state.shuffle);
-                if let Some(p) = self.player.as_mut() { p.set_volume(state.volume) };
+                if let Some(p) = self.player.as_mut() {
+                    p.set_volume(state.volume)
+                };
 
                 // Sync queue cursor with loaded track
                 self.queue_cursor = self.playlist.current_real_index().unwrap_or(0);
@@ -426,10 +426,16 @@ impl App {
                 // Load the track but always start paused
                 if let Some(entry) = self.playlist.current_entry() {
                     let path = entry.path.clone();
-                    let start_pos = if state.position_ms > 0 { Some(state.position_ms) } else { None };
+                    let start_pos = if state.position_ms > 0 {
+                        Some(state.position_ms)
+                    } else {
+                        None
+                    };
                     let load_ok = if let Some(player) = self.player.as_mut() {
                         player.load_track_with_pos(&path, start_pos).is_ok()
-                    } else { false };
+                    } else {
+                        false
+                    };
 
                     if load_ok {
                         self.set_now_playing_meta();
@@ -599,38 +605,50 @@ impl App {
 
     pub fn play(&mut self) {
         self.stopped = false;
-        if let Some(p) = self.player.as_mut() { p.play() };
+        if let Some(p) = self.player.as_mut() {
+            p.play()
+        };
         self.push_mpris_playback();
         self.refresh_needed = true;
     }
 
     pub fn pause(&mut self) {
-        if let Some(p) = self.player.as_mut() { p.pause() };
+        if let Some(p) = self.player.as_mut() {
+            p.pause()
+        };
         self.push_mpris_playback();
         self.refresh_needed = true;
     }
 
     pub fn stop(&mut self) {
         self.stopped = true;
-        if let Some(p) = self.player.as_mut() { p.stop() };
+        if let Some(p) = self.player.as_mut() {
+            p.stop()
+        };
         self.push_mpris_playback();
         self.refresh_needed = true;
     }
 
     pub fn volume_up(&mut self) {
-        if let Some(p) = self.player.as_mut() { p.volume_up() };
+        if let Some(p) = self.player.as_mut() {
+            p.volume_up()
+        };
         self.push_mpris_playback();
         self.refresh_needed = true;
     }
 
     pub fn volume_down(&mut self) {
-        if let Some(p) = self.player.as_mut() { p.volume_down() };
+        if let Some(p) = self.player.as_mut() {
+            p.volume_down()
+        };
         self.push_mpris_playback();
         self.refresh_needed = true;
     }
 
     pub fn seek(&mut self, pos_ms: u64) {
-        if let Some(p) = self.player.as_mut() { p.seek(pos_ms) };
+        if let Some(p) = self.player.as_mut() {
+            p.seek(pos_ms)
+        };
         if let Some(ref state) = self.mpris_state {
             let pos_us = pos_ms as i64 * 1000;
             state.position_us.store(pos_us, Ordering::Relaxed);
@@ -654,7 +672,9 @@ impl App {
     }
 
     pub fn toggle_pause(&mut self) {
-        if let Some(p) = self.player.as_mut() { p.toggle_pause() };
+        if let Some(p) = self.player.as_mut() {
+            p.toggle_pause()
+        };
         self.push_mpris_playback();
         self.refresh_needed = true;
     }
@@ -809,7 +829,9 @@ impl App {
                 state.length_us.store(
                     meta.duration
                         .map(|d| d.as_micros() as i64)
-                        .unwrap_or_else(|| (self.player().map(|p| p.duration_ms()).unwrap_or(0) * 1000) as i64),
+                        .unwrap_or_else(|| {
+                            (self.player().map(|p| p.duration_ms()).unwrap_or(0) * 1000) as i64
+                        }),
                     Ordering::Relaxed,
                 );
                 state.loop_status.store(
@@ -858,10 +880,12 @@ impl App {
     fn push_mpris_position(&mut self) {
         let mut length_changed = false;
         if let Some(ref state) = self.mpris_state {
-            state
-                .position_us
-                .store((self.player().map(|p| p.elapsed_ms()).unwrap_or(0) * 1000) as i64, Ordering::Relaxed);
-            let decoded_length_us = (self.player().map(|p| p.duration_ms()).unwrap_or(0) * 1000) as i64;
+            state.position_us.store(
+                (self.player().map(|p| p.elapsed_ms()).unwrap_or(0) * 1000) as i64,
+                Ordering::Relaxed,
+            );
+            let decoded_length_us =
+                (self.player().map(|p| p.duration_ms()).unwrap_or(0) * 1000) as i64;
             if decoded_length_us > 0 && state.length_us.load(Ordering::Relaxed) != decoded_length_us
             {
                 state.length_us.store(decoded_length_us, Ordering::Relaxed);
@@ -986,8 +1010,10 @@ impl App {
         match entry {
             LibraryEntry::Directory { .. } => {
                 let tracks = entry.get_all_tracks();
-                let all_enqueued =
-                    !tracks.is_empty() && tracks.iter().all(|(p, _)| self.playlist.entry_paths.contains(p));
+                let all_enqueued = !tracks.is_empty()
+                    && tracks
+                        .iter()
+                        .all(|(p, _)| self.playlist.entry_paths.contains(p));
 
                 if all_enqueued {
                     // Dequeue: remove all files belonging to this directory from the playlist
@@ -1099,8 +1125,10 @@ impl App {
         match entry {
             LibraryEntry::Directory { .. } => {
                 let tracks = entry.get_all_tracks();
-                let all_enqueued =
-                    !tracks.is_empty() && tracks.iter().all(|(p, _)| self.playlist.entry_paths.contains(p));
+                let all_enqueued = !tracks.is_empty()
+                    && tracks
+                        .iter()
+                        .all(|(p, _)| self.playlist.entry_paths.contains(p));
 
                 if all_enqueued {
                     // Dequeue
@@ -1209,7 +1237,8 @@ impl App {
 
         let matcher = SkimMatcherV2::default();
         // Reuse the pre-computed fully-expanded flat library — zero allocation per keystroke.
-        let mut scored: Vec<(i64, LibraryEntry)> = self.full_flat_library
+        let mut scored: Vec<(i64, LibraryEntry)> = self
+            .full_flat_library
             .iter()
             .filter_map(|item| {
                 matcher
@@ -1241,7 +1270,9 @@ impl App {
     /// Halt playback and purge all playlist items.
     pub fn clear_playlist(&mut self) {
         self.playlist.clear();
-        if let Some(p) = self.player.as_mut() { p.stop() };
+        if let Some(p) = self.player.as_mut() {
+            p.stop()
+        };
         self.queue_cursor = 0;
         self.now_playing_meta = None;
         self.current_cover_protocol = None;

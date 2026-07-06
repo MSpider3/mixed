@@ -55,7 +55,6 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         return handle_dir_input(app, key);
     }
 
-
     match key.code {
         // Global quit
         KeyCode::Char('q') | KeyCode::Esc => return true,
@@ -110,7 +109,8 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             app.stop();
         }
         KeyCode::Char('a') => {
-            let starting_position = app.pending_seek
+            let starting_position = app
+                .pending_seek
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or_else(|| app.player().map(|p| p.elapsed_ms()).unwrap_or(0));
             let target = starting_position.saturating_sub(5000);
@@ -119,10 +119,12 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             app.refresh_needed = true;
         }
         KeyCode::Char('d') => {
-            let starting_position = app.pending_seek
+            let starting_position = app
+                .pending_seek
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or_else(|| app.player().map(|p| p.elapsed_ms()).unwrap_or(0));
-            let target = (starting_position + 5000).min(app.player().map(|p| p.duration_ms()).unwrap_or(0));
+            let target =
+                (starting_position + 5000).min(app.player().map(|p| p.duration_ms()).unwrap_or(0));
             app.pending_seek = Some(std::time::Duration::from_millis(target));
             app.last_seek_input = Some(std::time::Instant::now());
             app.refresh_needed = true;
@@ -279,10 +281,9 @@ fn scroll_up(app: &mut App) {
                 app.search_cursor -= 1;
             }
         }
-        ActivePanel::NowPlaying
-            if app.show_full_lyrics && app.lyrics_scroll > 0 => {
-                app.lyrics_scroll -= 1;
-            }
+        ActivePanel::NowPlaying if app.show_full_lyrics && app.lyrics_scroll > 0 => {
+            app.lyrics_scroll -= 1;
+        }
         _ => {}
     }
 }
@@ -304,10 +305,9 @@ fn scroll_down(app: &mut App) {
         ActivePanel::Search => {
             app.search_cursor += 1;
         }
-        ActivePanel::NowPlaying
-            if app.show_full_lyrics => {
-                app.lyrics_scroll += 1;
-            }
+        ActivePanel::NowPlaying if app.show_full_lyrics => {
+            app.lyrics_scroll += 1;
+        }
         _ => {}
     }
 }
