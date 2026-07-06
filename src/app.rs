@@ -649,6 +649,7 @@ impl App {
         if let Some(p) = self.player.as_mut() {
             p.seek(pos_ms)
         };
+        #[cfg(target_os = "linux")]
         if let Some(ref state) = self.mpris_state {
             let pos_us = pos_ms as i64 * 1000;
             state.position_us.store(pos_us, Ordering::Relaxed);
@@ -704,6 +705,7 @@ impl App {
 
     pub fn toggle_shuffle(&mut self) {
         self.playlist.set_shuffle(!self.playlist.shuffle);
+        #[cfg(target_os = "linux")]
         if let Some(ref mpris) = self.mpris_state {
             mpris
                 .shuffle
@@ -721,6 +723,7 @@ impl App {
 
     pub fn cycle_repeat(&mut self) {
         self.playlist.repeat = self.playlist.repeat.next();
+        #[cfg(target_os = "linux")]
         if let Some(ref mpris) = self.mpris_state {
             let loop_status = match self.playlist.repeat {
                 RepeatMode::Off => 0,
