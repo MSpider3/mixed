@@ -242,7 +242,7 @@ impl MediaPlayer2Player {
     #[zbus(property)]
     fn set_volume(&self, value: f64) {
         // Clamp to [0.0, 1.0]
-        let clamped = value.max(0.0).min(1.0);
+        let clamped = value.clamp(0.0, 1.0);
         self.state.volume.store(clamped.to_bits(), Ordering::Relaxed);
         self.send_command(MediaCommand::SetVolume(clamped));
     }

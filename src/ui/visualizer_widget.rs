@@ -17,7 +17,7 @@ const SPECTRUM_GRADIENT: &[Color] = &[Color::Cyan, Color::Magenta, Color::LightM
 thread_local! {
     /// Cache of pre-repeated bar character strings for the current bar_width.
     /// Recomputed only when the terminal is resized (i.e. when bar_width changes).
-    static BAR_CACHE: RefCell<Option<(usize, [String; 9])>> = RefCell::new(None);
+    static BAR_CACHE: RefCell<Option<(usize, [String; 9])>> = const { RefCell::new(None) };
 }
 
 /// Render spectrum visualizer using block characters.
@@ -79,8 +79,8 @@ pub fn render_spectrum(f: &mut Frame, area: Rect, bars: &[u16], max_height: u16)
             spans.push(Span::raw(" ".repeat(left_padding)));
         }
 
-        for bar_idx in 0..num_bars {
-            let bar_height = bars[bar_idx] as usize;
+        for (bar_idx, &bar_val) in bars.iter().enumerate().take(num_bars) {
+            let bar_height = bar_val as usize;
             let full_rows = bar_height / 8;
             let partial = bar_height % 8;
 
@@ -94,7 +94,7 @@ pub fn render_spectrum(f: &mut Frame, area: Rect, bars: &[u16], max_height: u16)
 
             // Color based on relative height
             let height_ratio = if max_height > 0 {
-                (bars[bar_idx] as f32) / (max_height as f32 * 8.0)
+                (bar_val as f32) / (max_height as f32 * 8.0)
             } else {
                 0.0
             };

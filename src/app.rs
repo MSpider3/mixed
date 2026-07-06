@@ -501,10 +501,10 @@ impl App {
                     // Resolve XDG/platform cache directory for cover art files
                     let cache_dir = directories::ProjectDirs::from("", "", "mixed")
                         .map(|p| p.cache_dir().to_path_buf())
-                        .unwrap_or_else(|| std::env::temp_dir());
+                        .unwrap_or_else(std::env::temp_dir);
                     let _ = std::fs::create_dir_all(&cache_dir);
 
-                    let safe_title = title_key.replace(' ', "_").replace('/', "_");
+                    let safe_title = title_key.replace([' ', '/'], "_");
                     let tmp_path = cache_dir.join(format!("mixed_cover_{}.png", safe_title));
 
                     // Save BEFORE moving dyn_img into the protocol (move drops pixel buffer)
@@ -537,9 +537,7 @@ impl App {
         self.last_seek_input = None;
         if let Some(entry) = self.playlist.current_entry() {
             let path = entry.path.clone();
-            let load_res = if let Some(player) = self.player.as_mut() {
-                Some(player.load_track(&path))
-            } else { None };
+            let load_res = self.player.as_mut().map(|player| player.load_track(&path));
 
             if let Some(res) = load_res {
                 match res {
@@ -670,7 +668,7 @@ impl App {
             return;
         }
 
-        self.playlist.next();
+        self.playlist.advance_track();
         self.play_current();
         self.refresh_needed = true;
     }
@@ -1220,7 +1218,7 @@ impl App {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
         self.search_results = scored.into_iter().map(|(_, e)| e).collect();
         self.search_cursor = 0;
     }

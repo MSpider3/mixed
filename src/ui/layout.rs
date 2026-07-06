@@ -166,7 +166,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 .playlist
                 .current_entry()
                 .map(|e| e.metadata.display_title(app.config.strip_track_numbers));
-            branding::render_logo_with_song(f, logo_rect, song_name.as_deref());
+            branding::render_logo_with_song(f, logo_rect, song_name);
         }
 
         if let Some(inst_rect) = instructions_area {
@@ -227,7 +227,7 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
             .constraints(constraints)
             .split(area);
 
-        branding::render_logo_with_song(f, layout[0], song_name.as_deref());
+        branding::render_logo_with_song(f, layout[0], song_name);
         render_instructions(f, layout[1], ActivePanel::NowPlaying);
         draw_metadata(f, app, layout[2]);
         draw_lyrics(f, app, layout[4]);
@@ -253,7 +253,7 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
         .constraints(constraints)
         .split(area);
 
-    branding::render_logo_with_song(f, layout[0], song_name.as_deref());
+    branding::render_logo_with_song(f, layout[0], song_name);
     render_instructions(f, layout[1], ActivePanel::NowPlaying);
     draw_metadata(f, app, layout[2]);
     draw_lyrics(f, app, layout[4]);
@@ -483,11 +483,7 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let scroll = if highlighted_visual_idx >= half {
-        highlighted_visual_idx - half
-    } else {
-        0
-    };
+    let scroll = highlighted_visual_idx.saturating_sub(half);
     let scroll = scroll.min(visual_items.len().saturating_sub(1));
     let start = scroll;
     let end = (scroll + visible_height).min(visual_items.len());

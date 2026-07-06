@@ -52,8 +52,8 @@ impl SampleRingBuffer {
         let len = self.buffer.len();
         let count = count.min(len);
         let start = (self.write_pos + len - count) % len;
-        for i in 0..count {
-            dest[i] = self.buffer[(start + i) % len];
+        for (i, slot) in dest.iter_mut().enumerate().take(count) {
+            *slot = self.buffer[(start + i) % len];
         }
     }
 }

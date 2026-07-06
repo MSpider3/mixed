@@ -70,8 +70,8 @@ impl VisualizerEngine {
         }
 
         // Apply window and convert to complex directly into reused buffer
-        for i in 0..self.fft_size {
-            self.fft_buffer[i] = Complex::new(samples[i] * self.window[i], 0.0);
+        for (i, item) in samples.iter().enumerate().take(self.fft_size) {
+            self.fft_buffer[i] = Complex::new(item * self.window[i], 0.0);
         }
 
         // Perform FFT in place using the planned runner
@@ -178,7 +178,7 @@ fn map_to_bars_inplace(magnitudes: &[f32], bars: &mut [f32], sample_rate: u32, f
     let db_ceil = -18.0f32;
     let emphasis = 1.3f32;
 
-    for i in 0..num_bars {
+    for bar in bars.iter_mut().take(num_bars) {
         let center = if center_freq > nyquist {
             nyquist
         } else {
@@ -188,7 +188,7 @@ fn map_to_bars_inplace(magnitudes: &[f32], bars: &mut [f32], sample_rate: u32, f
         };
 
         if center <= 0.0 || center > nyquist {
-            bars[i] = 0.0;
+            *bar = 0.0;
             continue;
         }
 
@@ -231,9 +231,9 @@ fn map_to_bars_inplace(magnitudes: &[f32], bars: &mut [f32], sample_rate: u32, f
         ratio = ratio.powf(emphasis);
 
         if ratio < 0.1 {
-            bars[i] = 0.0;
+            *bar = 0.0;
         } else {
-            bars[i] = ratio;
+            *bar = ratio;
         }
     }
 }

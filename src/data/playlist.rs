@@ -4,17 +4,12 @@ use std::path::PathBuf;
 use crate::data::metadata::TrackMetadata;
 
 /// Repeat mode for the player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum RepeatMode {
+    #[default]
     Off,
     Track,
     Queue,
-}
-
-impl Default for RepeatMode {
-    fn default() -> Self {
-        RepeatMode::Off
-    }
 }
 
 impl RepeatMode {
@@ -247,7 +242,7 @@ impl Playlist {
         }
     }
 
-    pub fn next(&mut self) -> bool {
+    pub fn advance_track(&mut self) -> bool {
         if self.play_order.is_empty() {
             return false;
         }

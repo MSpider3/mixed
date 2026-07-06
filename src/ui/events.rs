@@ -279,13 +279,10 @@ fn scroll_up(app: &mut App) {
                 app.search_cursor -= 1;
             }
         }
-        ActivePanel::NowPlaying => {
-            if app.show_full_lyrics {
-                if app.lyrics_scroll > 0 {
-                    app.lyrics_scroll -= 1;
-                }
+        ActivePanel::NowPlaying
+            if app.show_full_lyrics && app.lyrics_scroll > 0 => {
+                app.lyrics_scroll -= 1;
             }
-        }
         _ => {}
     }
 }
@@ -307,11 +304,10 @@ fn scroll_down(app: &mut App) {
         ActivePanel::Search => {
             app.search_cursor += 1;
         }
-        ActivePanel::NowPlaying => {
-            if app.show_full_lyrics {
+        ActivePanel::NowPlaying
+            if app.show_full_lyrics => {
                 app.lyrics_scroll += 1;
             }
-        }
         _ => {}
     }
 }

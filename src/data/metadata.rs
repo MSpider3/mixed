@@ -15,13 +15,14 @@ pub struct LrcLine {
 }
 
 /// How lyrics are stored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum LyricsKind {
     /// Timestamped lines from embedded tags or .lrc file.
     Timed(Vec<LrcLine>),
     /// Plain text lyrics without timestamps.
     Untimed(Vec<String>),
     /// No lyrics found.
+    #[default]
     None,
 }
 
@@ -64,11 +65,6 @@ pub struct TrackMetadata {
     pub bitrate: Option<u32>,
 }
 
-impl Default for LyricsKind {
-    fn default() -> Self {
-        LyricsKind::None
-    }
-}
 
 impl TrackMetadata {
     /// Returns the display title, falling back to the filename stem.
@@ -115,13 +111,13 @@ impl TrackMetadata {
 
 /// Reads metadata from an audio file using lofty.
 pub fn read_metadata(path: &Path) -> TrackMetadata {
-    let mut meta = TrackMetadata::default();
-
-    // Set title from filename as fallback
-    meta.title = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string());
+    let mut meta = TrackMetadata {
+        title: path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string()),
+        ..TrackMetadata::default()
+    };
 
     let tagged = match Probe::open(path).and_then(|p| p.read()) {
         Ok(t) => t,
