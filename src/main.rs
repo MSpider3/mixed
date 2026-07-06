@@ -317,7 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal.show_cursor()?;
 
     // Reset terminal title
-    print!("\x1b]0;{}\x07", "Terminal");
+    print!("\x1b]0;Terminal\x07");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     Ok(())
@@ -326,9 +326,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(target_os = "linux")]
 fn silence_alsa() {
     unsafe {
-        let lib = libc::dlopen(b"libasound.so.2\0".as_ptr() as *const libc::c_char, libc::RTLD_NOW);
+        let lib = libc::dlopen(c"libasound.so.2".as_ptr(), libc::RTLD_NOW);
         if !lib.is_null() {
-            let set_handler = libc::dlsym(lib, b"snd_lib_error_set_handler\0".as_ptr() as *const libc::c_char);
+            let set_handler = libc::dlsym(lib, c"snd_lib_error_set_handler".as_ptr());
             if !set_handler.is_null() {
                 type HandlerFn = unsafe extern "C" fn(*const libc::c_char, libc::c_int, *const libc::c_char, libc::c_int, *const libc::c_char);
                 let set_handler_fn: unsafe extern "C" fn(Option<HandlerFn>) -> libc::c_int = std::mem::transmute(set_handler);
