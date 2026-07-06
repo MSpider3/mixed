@@ -68,6 +68,62 @@ Dynamic terminal size checking that automatically shifts to a minimal portrait n
 
 ## Installation
 
+### Method 1: Pre-compiled Binaries (Recommended)
+
+You can download the pre-compiled binary for your system from the **[Releases](../../releases)** page.
+
+#### Linux (x86_64)
+1. Download `mixed-v<version>-x86_64-unknown-linux-gnu.tar.gz`.
+2. Extract the archive:
+   ```bash
+   tar -xzf mixed-v*.tar.gz
+   ```
+3. Move the `mixed` binary to your system PATH (e.g. `/usr/local/bin`):
+   ```bash
+   sudo mv mixed /usr/local/bin/
+   ```
+4. Run the player by typing `mixed` in your terminal.
+
+#### macOS (Apple Silicon or Intel)
+1. Download either `mixed-v<version>-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v<version>-x86_64-apple-darwin.tar.gz` (Intel).
+2. Extract the archive:
+   ```bash
+   tar -xzf mixed-v*.tar.gz
+   ```
+3. Move `mixed` to a directory in your PATH (e.g. `/usr/local/bin`):
+   ```bash
+   mv mixed /usr/local/bin/
+   ```
+4. *Note:* If macOS Gatekeeper prevents execution, run the following to bypass the developer warning:
+   ```bash
+   xattr -cr /usr/local/bin/mixed
+   ```
+
+#### Windows (x86_64)
+1. Download `mixed-v<version>-x86_64-pc-windows-msvc.zip`.
+2. Extract the `.zip` file.
+3. Move `mixed.exe` to a folder of your choice and run it in a terminal emulator (PowerShell, Command Prompt, or Git Bash).
+
+#### Android (Termux)
+1. Install the `termux-api` package in Termux:
+   ```bash
+   pkg install termux-api
+   ```
+2. Make sure you have the **Termux:API** application installed from F-Droid to enable widget interactions.
+3. Download `mixed-v<version>-aarch64-linux-android.tar.gz`.
+4. Extract the binary inside Termux and make it executable:
+   ```bash
+   tar -xzf mixed-v*.tar.gz
+   chmod +x mixed
+   mv mixed $PREFIX/bin/
+   ```
+
+---
+
+### Method 2: Build from Source
+
+If you have Rust and Cargo installed:
+
 ```bash
 # Clone the repository
 git clone https://github.com/mehulgolecha/mixed.git
