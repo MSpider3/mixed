@@ -9,7 +9,7 @@ pub struct MpvBackend {
     stream: std::os::unix::net::UnixStream,
     socket_path: String,
     incoming_data: Vec<u8>,
-    
+
     // Polled state
     elapsed: Duration,
     duration: Option<Duration>,
@@ -21,14 +21,15 @@ pub struct MpvBackend {
 
 impl MpvBackend {
     pub fn new() -> Option<Self> {
-        let prefix = std::env::var("PREFIX").unwrap_or_else(|_| "/data/data/com.termux/files/usr".to_string());
+        let prefix = std::env::var("PREFIX")
+            .unwrap_or_else(|_| "/data/data/com.termux/files/usr".to_string());
         let socket_path = format!("{}/tmp/mpv_mixed.sock", prefix);
-        
+
         // Ensure parent directory exists
         if let Some(parent) = Path::new(&socket_path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        
+
         let _ = std::fs::remove_file(&socket_path);
 
         let child = std::process::Command::new("mpv")
@@ -47,7 +48,7 @@ impl MpvBackend {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        
+
         let stream = stream?;
         stream.set_nonblocking(true).ok()?;
 
@@ -248,7 +249,7 @@ impl Drop for MpvBackend {
             let _ = self.stream.write_all(format!("{}\n", cmd_str).as_bytes());
             let _ = self.stream.flush();
         }
-        
+
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.socket_path);

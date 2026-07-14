@@ -134,7 +134,7 @@ impl AudioBackend {
 /// Thread-isolated audio player wrapping AudioBackend.
 pub struct Player {
     cmd_tx: Sender<PlayerCmd>,
-    
+
     #[cfg(not(target_os = "android"))]
     pub sample_buffer: SharedSampleBuffer,
 
@@ -176,7 +176,7 @@ impl Player {
                 Some(b) => b,
                 None => return,
             };
-            
+
             // Sync initial volume
             backend.set_volume(80);
 

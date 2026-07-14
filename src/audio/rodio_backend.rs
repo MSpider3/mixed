@@ -153,12 +153,11 @@ impl RodioBackend {
                     let diff_ms = pos_ms - current_ms;
                     let channels = self.current_channels;
                     let sample_rate = self.current_sample_rate;
-                    let samples_to_skip = (diff_ms as f64 / 1000.0
-                        * sample_rate as f64
-                        * channels as f64)
-                        as u64;
+                    let samples_to_skip =
+                        (diff_ms as f64 / 1000.0 * sample_rate as f64 * channels as f64) as u64;
 
-                    self.skip_request.fetch_add(samples_to_skip, Ordering::Release);
+                    self.skip_request
+                        .fetch_add(samples_to_skip, Ordering::Release);
 
                     self.accumulated_ms = pos_ms;
                     if self.start_instant.is_some() {
@@ -168,8 +167,7 @@ impl RodioBackend {
                     // Backward seek: reopen and fast-forward
                     if let Some(ref path) = self.current_path {
                         self.sink.stop();
-                        if let Ok(new_sink) =
-                            run_with_high_priority(|| Sink::try_new(&self.handle))
+                        if let Ok(new_sink) = run_with_high_priority(|| Sink::try_new(&self.handle))
                         {
                             self.sink = new_sink;
                             self.sink.set_volume(self.volume as f32 / 100.0);
@@ -183,10 +181,8 @@ impl RodioBackend {
                                     self.current_channels = ch;
 
                                     self.skip_request.store(0, Ordering::Release);
-                                    let samples_to_skip = (pos_ms as f64 / 1000.0
-                                        * sr as f64
-                                        * ch as f64)
-                                        as u64;
+                                    let samples_to_skip =
+                                        (pos_ms as f64 / 1000.0 * sr as f64 * ch as f64) as u64;
 
                                     let viz_source = VisualizerSource::new(
                                         source.convert_samples::<f32>(),
@@ -194,8 +190,7 @@ impl RodioBackend {
                                         self.skip_request.clone(),
                                     );
 
-                                    self.skip_request
-                                        .store(samples_to_skip, Ordering::Release);
+                                    self.skip_request.store(samples_to_skip, Ordering::Release);
 
                                     self.sink.append(viz_source);
                                     if !self.is_paused {
