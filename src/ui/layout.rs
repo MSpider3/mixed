@@ -367,22 +367,41 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_visualizer(f: &mut Frame, app: &mut App, area: Rect) {
-    // try_read() is non-blocking: if the FFT thread currently holds the write
-    // lock, we skip this frame rather than stalling the render loop (and
-    // indirectly blocking the audio decode path via mutex back-pressure).
-    if let Ok(bars) = app.visualizer_bars.try_read() {
-        match app.visualizer_mode {
-            VisualizerMode::Spectrum => {
-                let scaled: Vec<u16> = bars
-                    .iter()
-                    .map(|&val| (val * (area.height as f32 * 8.0)) as u16)
-                    .collect();
-                visualizer_widget::render_spectrum(f, area, &scaled, area.height);
-            }
-            VisualizerMode::Braille => {
-                visualizer_widget::render_braille(f, area, &bars);
+    #[cfg(not(target_os = "android"))]
+    {
+        // try_read() is non-blocking: if the FFT thread currently holds the write
+        // lock, we skip this frame rather than stalling the render loop (and
+        // indirectly blocking the audio decode path via mutex back-pressure).
+        if let Ok(bars) = app.visualizer_bars.try_read() {
+            match app.visualizer_mode {
+                VisualizerMode::Spectrum => {
+                    let scaled: Vec<u16> = bars
+                        .iter()
+                        .map(|&val| (val * (area.height as f32 * 8.0)) as u16)
+                        .collect();
+                    visualizer_widget::render_spectrum(f, area, &scaled, area.height);
+                }
+                VisualizerMode::Braille => {
+                    visualizer_widget::render_braille(f, area, &bars);
+                }
             }
         }
+    }
+    #[cfg(target_os = "android")]
+    {
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "~~ Visualizer Disabled on Android Termux ~~",
+                Style::default().fg(C_DIM).add_modifier(Modifier::ITALIC),
+            )),
+            Line::from(Span::styled(
+                "(Audio is routed through background MPV player)",
+                Style::default().fg(C_DIM).add_modifier(Modifier::ITALIC),
+            )),
+        ];
+        let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(paragraph, area);
     }
 }
 

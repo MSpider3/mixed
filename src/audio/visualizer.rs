@@ -1,4 +1,6 @@
+#[cfg(not(target_os = "android"))]
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
+#[cfg(not(target_os = "android"))]
 use std::sync::Arc;
 
 /// Visualizer mode.
@@ -19,6 +21,7 @@ impl VisualizerMode {
 
 /// FFT-based audio visualizer engine.
 /// Ported from kew's visuals.c and crav's audio processing.
+#[cfg(not(target_os = "android"))]
 pub struct VisualizerEngine {
     /// Number of FFT bins.
     fft_size: usize,
@@ -38,6 +41,7 @@ pub struct VisualizerEngine {
     new_bars: Vec<f32>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl VisualizerEngine {
     pub fn new(fft_size: usize, num_bars: usize) -> Self {
         let window = blackman_harris(fft_size);
@@ -135,6 +139,7 @@ impl VisualizerEngine {
 }
 
 /// Blackman-Harris window function (from kew's visuals.c).
+#[cfg(not(target_os = "android"))]
 fn blackman_harris(size: usize) -> Vec<f32> {
     let a0 = 0.35875;
     let a1 = 0.48829;
@@ -150,6 +155,7 @@ fn blackman_harris(size: usize) -> Vec<f32> {
 
 /// Map FFT magnitude bins to display bars using logarithmic 1/3 octave bands,
 /// dB scale normalization, and pink noise EQ compensation.
+#[cfg(not(target_os = "android"))]
 fn map_to_bars_inplace(magnitudes: &[f32], bars: &mut [f32], sample_rate: u32, fft_size: usize) {
     let num_bars = bars.len();
     if magnitudes.is_empty() || num_bars == 0 || sample_rate == 0 {

@@ -20,11 +20,9 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 ratatui-image = { version = "4", features = ["crossterm"] }
 
 # Audio decoding & playback
-symphonia = { version = "0.5", features = ["all"] }
-rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
+# symphonia, rodio, and rustfft are gated under the target cfg block below
 
 # DSP / Visualization
-rustfft = "6"
 crossbeam-channel = "0.5"
 
 # Metadata / Tags
@@ -69,3 +67,9 @@ strip = true
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 enumflags2 = "0.7"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+symphonia = { version = "0.5", features = ["all"] }
+rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
+rustfft = "6"
+

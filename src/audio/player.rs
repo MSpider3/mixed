@@ -1,13 +1,11 @@
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
-use rodio::{Decoder, OutputStream, Sink, Source};
-
-use crate::audio::viz_source::{new_shared_buffer, SharedSampleBuffer, VisualizerSource};
 use crossbeam_channel::{bounded, Sender};
+
+#[cfg(not(target_os = "android"))]
+use crate::audio::viz_source::SharedSampleBuffer;
 
 /// Commands sent to the background player thread.
 pub enum PlayerCmd {
@@ -22,14 +20,125 @@ pub enum PlayerCmd {
     SetVolume(u8),
 }
 
-/// Thread-isolated audio player wrapping rodio Sink.
+/// Unified audio backend router.
+pub enum AudioBackend {
+    #[cfg(not(target_os = "android"))]
+    Rodio(crate::audio::rodio_backend::RodioBackend),
+    #[cfg(target_os = "android")]
+    Mpv(crate::audio::mpv_backend::MpvBackend),
+}
+
+impl AudioBackend {
+    pub fn new() -> Option<Self> {
+        #[cfg(not(target_os = "android"))]
+        {
+            crate::audio::rodio_backend::RodioBackend::new().map(AudioBackend::Rodio)
+        }
+        #[cfg(target_os = "android")]
+        {
+            crate::audio::mpv_backend::MpvBackend::new().map(AudioBackend::Mpv)
+        }
+    }
+
+    pub fn play(&mut self, path: &str) -> Result<(), String> {
+        match self {
+            #[cfg(not(target_os = "android"))]
+            AudioBackend::Rodio(r) => r.play(path),
+            #[cfg(target_os = "android")]
+            AudioBackend::Mpv(m) => m.play(path),
+        }
+    }
+
+    pub fn pause(&mut self) {
+        match self {
+            #[cfg(not(target_os = "android"))]
+            AudioBackend::Rodio(r) => r.pause(),
+            #[cfg(target_os = "android")]
+            AudioBackend::Mpv(m) => m.pause(),
+        }
+    }
+
+    pub fn resume(&mut self) {
+        match self {
+            #[cfg(not(target_os = "android"))]
+            AudioBackend::Rodio(r) => r.resume(),
+            #[cfg(target_os = "android")]
+            AudioBackend::Mpv(m) => m.resume(),
+        }
+    }
+
+    pub fn seek_to(&mut self, target: std::time::Duration) {
+        match self {
+            #[cfg(not(target_os = "android"))]
+            AudioBackend::Rodio(r) => r.seek_to(target),
+            #[cfg(target_os = "android")]
+            AudioBackend::Mpv(m) => m.seek_to(target),
+        }
+    }
+
+    pub fn get_position(&mut self) -> std::time::Duration {
+        match self {
+            #[cfg(not(target_os = "android"))]
+            AudioBackend::Rodio(r) => r.get_position(),
+            #[cfg(target_os = "android")]
+            AudioBackend::Mpv(m) => m.get_position(),
+        }
+    }
+
+    pub fn stop(&mut self) {
+        match self {
+            #[cfg(not(target_os = "android"))]
+            AudioBackend::Rodio(r) => r.stop(),
+            #[cfg(target_os = "android")]
+            AudioBackend::Mpv(m) => m.stop(),
+        }
+    }
+
+    pub fn set_volume(&mut self, volume: u8) {
+        match self {
+            #[cfg(not(target_os = "android"))]
+            AudioBackend::Rodio(r) => r.set_volume(volume),
+            #[cfg(target_os = "android")]
+            AudioBackend::Mpv(m) => m.set_volume(volume),
+        }
+    }
+
+    pub fn get_volume(&mut self) -> Option<u8> {
+        match self {
+            #[cfg(not(target_os = "android"))]
+            AudioBackend::Rodio(r) => r.get_volume(),
+            #[cfg(target_os = "android")]
+            AudioBackend::Mpv(m) => m.get_volume(),
+        }
+    }
+
+    pub fn get_duration(&mut self) -> Option<std::time::Duration> {
+        match self {
+            #[cfg(not(target_os = "android"))]
+            AudioBackend::Rodio(r) => r.get_duration(),
+            #[cfg(target_os = "android")]
+            AudioBackend::Mpv(m) => m.get_duration(),
+        }
+    }
+
+    pub fn is_finished(&mut self) -> bool {
+        match self {
+            #[cfg(not(target_os = "android"))]
+            AudioBackend::Rodio(r) => r.is_finished(),
+            #[cfg(target_os = "android")]
+            AudioBackend::Mpv(m) => m.is_finished(),
+        }
+    }
+}
+
+/// Thread-isolated audio player wrapping AudioBackend.
 pub struct Player {
     cmd_tx: Sender<PlayerCmd>,
+    
+    #[cfg(not(target_os = "android"))]
     pub sample_buffer: SharedSampleBuffer,
 
     // Shared atomic states.
-    // State flags use Release/Acquire ordering to establish proper happens-before
-    // relationships across threads (important on non-TSO architectures like ARM).
     pub is_paused: Arc<AtomicBool>,
     pub is_playing: Arc<AtomicBool>,
     is_finished: Arc<AtomicBool>,
@@ -50,7 +159,9 @@ impl Player {
         let elapsed_ms = Arc::new(AtomicU64::new(0));
         let total_duration_ms = Arc::new(AtomicU64::new(0));
         let current_sample_rate = Arc::new(AtomicU32::new(44100));
-        let sample_buffer = new_shared_buffer(4096);
+
+        #[cfg(not(target_os = "android"))]
+        let sample_buffer = crate::audio::viz_source::new_shared_buffer(4096);
 
         let is_paused_clone = is_paused.clone();
         let is_playing_clone = is_playing.clone();
@@ -59,255 +170,56 @@ impl Player {
         let elapsed_ms_clone = elapsed_ms.clone();
         let total_duration_ms_clone = total_duration_ms.clone();
         let current_sample_rate_clone = current_sample_rate.clone();
-        let sample_buffer_clone = sample_buffer.clone();
 
         std::thread::spawn(move || {
-            let stream_res = run_with_high_priority(|| {
-                use rodio::cpal::traits::HostTrait;
-                let host = rodio::cpal::default_host();
-                let device = host.default_output_device()?;
-                OutputStream::try_from_device(&device).ok()
-            });
-
-            let (stream, handle) = match stream_res {
-                Some(s) => s,
+            let mut backend = match AudioBackend::new() {
+                Some(b) => b,
                 None => return,
             };
-
-            // Prevent stream from dropping immediately by keeping it in scope
-            let _stream = stream;
-
-            let sink_res = run_with_high_priority(|| Sink::try_new(&handle));
-            let mut sink = match sink_res {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            sink.set_volume(0.8);
-
-            let mut start_instant: Option<Instant> = None;
-            let mut accumulated_ms = 0u64;
-            let mut current_path: Option<PathBuf> = None;
-            let mut current_channels = 2u16;
-            let mut current_sample_rate = 44100u32;
-            let skip_request = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            
+            // Sync initial volume
+            backend.set_volume(80);
 
             loop {
                 // Poll commands; recv_timeout keeps real-time constraints
-                match cmd_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                match cmd_rx.recv_timeout(std::time::Duration::from_millis(50)) {
                     Ok(PlayerCmd::Load { path, start_pos_ms }) => {
-                        sink.stop();
-                        current_path = Some(path.clone());
-                        let new_sink_res = run_with_high_priority(|| Sink::try_new(&handle));
-                        match new_sink_res {
-                            Ok(s) => {
-                                sink = s;
-                                let vol = volume_clone.load(Ordering::Relaxed);
-                                sink.set_volume(vol as f32 / 100.0);
-
-                                match std::fs::File::open(&path) {
-                                    Ok(file) => {
-                                        let reader = BufReader::new(file);
-                                        match Decoder::new(reader) {
-                                            Ok(mut source) => {
-                                                let sr = source.sample_rate();
-                                                let ch = source.channels();
-                                                current_sample_rate = sr;
-                                                current_channels = ch;
-                                                current_sample_rate_clone
-                                                    .store(sr, Ordering::Relaxed);
-                                                let duration = source.total_duration();
-                                                if let Some(dur) = duration {
-                                                    total_duration_ms_clone.store(
-                                                        dur.as_millis() as u64,
-                                                        Ordering::Relaxed,
-                                                    );
-                                                } else {
-                                                    total_duration_ms_clone
-                                                        .store(0, Ordering::Relaxed);
-                                                }
-
-                                                if let Ok(mut buf) = sample_buffer_clone.lock() {
-                                                    buf.sample_rate = sr;
-                                                }
-
-                                                skip_request.store(0, Ordering::Release);
-
-                                                let mut actual_start_ms = 0;
-                                                if let Some(pos_ms) = start_pos_ms {
-                                                    if pos_ms > 0 {
-                                                        // Try native seek first on the decoder directly.
-                                                        if source
-                                                            .try_seek(
-                                                                std::time::Duration::from_millis(
-                                                                    pos_ms,
-                                                                ),
-                                                            )
-                                                            .is_ok()
-                                                        {
-                                                            actual_start_ms = pos_ms;
-                                                        } else {
-                                                            // Fallback to sample-dropping skip
-                                                            let samples_to_skip = (pos_ms as f64
-                                                                / 1000.0
-                                                                * sr as f64
-                                                                * ch as f64)
-                                                                as u64;
-                                                            skip_request.store(
-                                                                samples_to_skip,
-                                                                Ordering::Release,
-                                                            );
-                                                            actual_start_ms = pos_ms;
-                                                        }
-                                                    }
-                                                }
-
-                                                let viz_source = VisualizerSource::new(
-                                                    source.convert_samples::<f32>(),
-                                                    sample_buffer_clone.clone(),
-                                                    skip_request.clone(),
-                                                );
-                                                sink.append(viz_source);
-                                                sink.play();
-
-                                                accumulated_ms = actual_start_ms;
-                                                start_instant = Some(Instant::now());
-                                                // Release ordering: these stores must be
-                                                // visible before cmd_rx receives the next msg
-                                                is_paused_clone.store(false, Ordering::Release);
-                                                is_playing_clone.store(true, Ordering::Release);
-                                                is_finished_clone.store(false, Ordering::Release);
-                                            }
-                                            Err(e) => {
-                                                eprintln!("Failed to decode: {}", e);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to open file: {}", e);
-                                    }
+                        let path_str = path.to_string_lossy().to_string();
+                        match backend.play(&path_str) {
+                            Ok(()) => {
+                                if let Some(pos_ms) = start_pos_ms {
+                                    backend.seek_to(std::time::Duration::from_millis(pos_ms));
                                 }
+                                is_paused_clone.store(false, Ordering::Release);
+                                is_playing_clone.store(true, Ordering::Release);
+                                is_finished_clone.store(false, Ordering::Release);
                             }
                             Err(e) => {
-                                eprintln!("Failed to create sink: {}", e);
+                                eprintln!("Failed to play: {}", e);
                             }
                         }
                     }
                     Ok(PlayerCmd::Play) => {
-                        if start_instant.is_none() {
-                            sink.play();
-                            start_instant = Some(Instant::now());
-                            is_paused_clone.store(false, Ordering::Release);
-                            is_playing_clone.store(true, Ordering::Release);
-                        }
+                        backend.resume();
+                        is_paused_clone.store(false, Ordering::Release);
+                        is_playing_clone.store(true, Ordering::Release);
                     }
                     Ok(PlayerCmd::Pause) => {
-                        if let Some(start) = start_instant.take() {
-                            accumulated_ms += start.elapsed().as_millis() as u64;
-                            sink.pause();
-                            is_paused_clone.store(true, Ordering::Release);
-                            is_playing_clone.store(false, Ordering::Release);
-                        }
+                        backend.pause();
+                        is_paused_clone.store(true, Ordering::Release);
+                        is_playing_clone.store(false, Ordering::Release);
                     }
                     Ok(PlayerCmd::Seek(pos_ms)) => {
-                        let duration = std::time::Duration::from_millis(pos_ms);
-                        match sink.try_seek(duration) {
-                            Ok(()) => {
-                                accumulated_ms = pos_ms;
-                                if start_instant.is_some() {
-                                    start_instant = Some(Instant::now());
-                                }
-                            }
-                            Err(_) => {
-                                // Native seek failed. Implement hybrid seek.
-                                let running = if let Some(start) = &start_instant {
-                                    if !is_paused_clone.load(Ordering::Acquire) {
-                                        start.elapsed().as_millis() as u64
-                                    } else {
-                                        0
-                                    }
-                                } else {
-                                    0
-                                };
-                                let current_ms = accumulated_ms + running;
-                                if pos_ms >= current_ms {
-                                    // Forward seek: calculate samples to skip
-                                    let diff_ms = pos_ms - current_ms;
-                                    let channels = current_channels;
-                                    let sample_rate = current_sample_rate;
-                                    let samples_to_skip = (diff_ms as f64 / 1000.0
-                                        * sample_rate as f64
-                                        * channels as f64)
-                                        as u64;
-
-                                    skip_request.fetch_add(samples_to_skip, Ordering::Release);
-
-                                    accumulated_ms = pos_ms;
-                                    if start_instant.is_some() {
-                                        start_instant = Some(Instant::now());
-                                    }
-                                } else {
-                                    // Backward seek: reopen and fast-forward
-                                    if let Some(ref path) = current_path {
-                                        sink.stop();
-                                        if let Ok(new_sink) =
-                                            run_with_high_priority(|| Sink::try_new(&handle))
-                                        {
-                                            sink = new_sink;
-                                            let vol = volume_clone.load(Ordering::Relaxed);
-                                            sink.set_volume(vol as f32 / 100.0);
-
-                                            if let Ok(file) = std::fs::File::open(path) {
-                                                let reader = BufReader::new(file);
-                                                if let Ok(source) = Decoder::new(reader) {
-                                                    let sr = source.sample_rate();
-                                                    let ch = source.channels();
-                                                    current_sample_rate = sr;
-                                                    current_channels = ch;
-                                                    current_sample_rate_clone
-                                                        .store(sr, Ordering::Relaxed);
-
-                                                    skip_request.store(0, Ordering::Release);
-                                                    let samples_to_skip = (pos_ms as f64 / 1000.0
-                                                        * sr as f64
-                                                        * ch as f64)
-                                                        as u64;
-
-                                                    let viz_source = VisualizerSource::new(
-                                                        source.convert_samples::<f32>(),
-                                                        sample_buffer_clone.clone(),
-                                                        skip_request.clone(),
-                                                    );
-
-                                                    skip_request
-                                                        .store(samples_to_skip, Ordering::Release);
-
-                                                    sink.append(viz_source);
-                                                    if !is_paused_clone.load(Ordering::Acquire) {
-                                                        sink.play();
-                                                        start_instant = Some(Instant::now());
-                                                    } else {
-                                                        sink.pause();
-                                                        start_instant = None;
-                                                    }
-                                                    accumulated_ms = pos_ms;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        backend.seek_to(std::time::Duration::from_millis(pos_ms));
                     }
                     Ok(PlayerCmd::Stop) => {
-                        sink.stop();
-                        start_instant = None;
-                        accumulated_ms = 0;
+                        backend.stop();
                         is_paused_clone.store(false, Ordering::Release);
                         is_playing_clone.store(false, Ordering::Release);
                         is_finished_clone.store(true, Ordering::Release);
                     }
                     Ok(PlayerCmd::SetVolume(vol)) => {
-                        sink.set_volume(vol as f32 / 100.0);
+                        backend.set_volume(vol);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                         break;
@@ -315,29 +227,47 @@ impl Player {
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 }
 
-                // Update elapsed tracking
-                let running = if let Some(start) = &start_instant {
-                    if !is_paused_clone.load(Ordering::Acquire) {
-                        start.elapsed().as_millis() as u64
-                    } else {
-                        0
+                #[cfg(target_os = "android")]
+                {
+                    if let AudioBackend::Mpv(ref mut m) = backend {
+                        m.poll_status();
                     }
-                } else {
-                    0
-                };
-                elapsed_ms_clone.store(accumulated_ms + running, Ordering::Relaxed);
+                }
+
+                // Update elapsed tracking
+                let elapsed = backend.get_position();
+                elapsed_ms_clone.store(elapsed.as_millis() as u64, Ordering::Relaxed);
+
+                // Update duration tracking
+                if let Some(dur) = backend.get_duration() {
+                    total_duration_ms_clone.store(dur.as_millis() as u64, Ordering::Relaxed);
+                }
 
                 // Update finished state
-                let finished = sink.empty();
+                let finished = backend.is_finished();
                 is_finished_clone.store(finished, Ordering::Release);
                 if finished {
                     is_playing_clone.store(false, Ordering::Release);
+                }
+
+                // Update volume atomic to match backend volume
+                if let Some(vol) = backend.get_volume() {
+                    volume_clone.store(vol, Ordering::Relaxed);
+                }
+
+                #[cfg(not(target_os = "android"))]
+                {
+                    #[allow(irrefutable_let_patterns)]
+                    if let AudioBackend::Rodio(ref r) = backend {
+                        current_sample_rate_clone.store(r.current_sample_rate, Ordering::Relaxed);
+                    }
                 }
             }
         });
 
         Some(Self {
             cmd_tx,
+            #[cfg(not(target_os = "android"))]
             sample_buffer,
             is_paused,
             is_playing,
@@ -458,27 +388,4 @@ impl Player {
     pub fn current_sample_rate(&self) -> u32 {
         self.current_sample_rate.load(Ordering::Relaxed)
     }
-}
-
-#[cfg(target_os = "linux")]
-fn run_with_high_priority<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    unsafe {
-        let tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
-        let old_priority = libc::getpriority(libc::PRIO_PROCESS, tid as libc::id_t);
-        libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, -10);
-        let result = f();
-        libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, old_priority);
-        result
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_with_high_priority<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    f()
 }
