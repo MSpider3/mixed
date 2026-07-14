@@ -290,6 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Save state before exit
     app.save_state();
     app.config.save();
+    app.clear_android_notification();
 
     // Signal MPRIS background thread to release the D-Bus name gracefully.
     // Dropping update_tx closes the channel; the tokio select loop will also

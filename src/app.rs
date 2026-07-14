@@ -85,6 +85,10 @@ pub struct App {
     pub pending_mpris_update: bool,
     pub last_mpris_trigger: Option<std::time::Instant>,
 
+    // -- Android Media (Android only) --
+    #[cfg(target_os = "android")]
+    pub android_media: Option<crate::sys::android_media::AndroidMediaHandle>,
+
     // -- Status message --
     pub status_msg: Option<String>,
     pub stopped: bool,
@@ -163,6 +167,8 @@ impl App {
             mpris_state: None,
             #[cfg(target_os = "linux")]
             mpris_update_tx: None,
+            #[cfg(target_os = "android")]
+            android_media: None,
             pending_mpris_update: false,
             last_mpris_trigger: None,
             status_msg: None,
@@ -195,8 +201,16 @@ impl App {
             app.mpris_state = Some(mpris_state);
             app.mpris_update_tx = Some(mpris_update_tx);
         }
-        // Suppress unused warning on non-Linux
-        #[cfg(not(target_os = "linux"))]
+
+        // Start Android media bridge (Android only)
+        #[cfg(target_os = "android")]
+        {
+            let handle = crate::sys::android_media::start_android_media(command_tx.clone());
+            app.android_media = Some(handle);
+        }
+
+        // Suppress unused warning on non-Linux, non-Android platforms
+        #[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
         let _ = command_tx;
 
         app
@@ -558,6 +572,7 @@ impl App {
                         self.generate_cover_art_protocol();
                         self.push_mpris_metadata();
                         self.push_mpris_playback();
+                        self.update_android_notification();
 
                         // Sync queue cursor with currently playing track
                         self.queue_cursor = self.playlist.current_real_index().unwrap_or(0);
@@ -614,6 +629,7 @@ impl App {
             p.play()
         };
         self.push_mpris_playback();
+        self.update_android_notification();
         self.refresh_needed = true;
     }
 
@@ -631,6 +647,7 @@ impl App {
             p.stop()
         };
         self.push_mpris_playback();
+        self.clear_android_notification();
         self.refresh_needed = true;
     }
 
@@ -915,6 +932,32 @@ impl App {
 
     #[cfg(not(target_os = "linux"))]
     fn push_mpris_position(&mut self) {}
+
+    // ── Android notification helpers ──────────────────────────────────────────
+
+    #[cfg(target_os = "android")]
+    pub fn update_android_notification(&self) {
+        if let Some(ref handle) = self.android_media {
+            if let Some(ref meta) = self.now_playing_meta {
+                let title = meta.display_title(self.config.strip_track_numbers);
+                let artist = meta.display_artist();
+                handle.push_metadata(&title, &artist);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn update_android_notification(&self) {}
+
+    #[cfg(target_os = "android")]
+    pub fn clear_android_notification(&self) {
+        if let Some(ref handle) = self.android_media {
+            handle.shutdown();
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn clear_android_notification(&self) {}
 
     /// Enqueue the selected library entry.
     pub fn library_enqueue_selected(&mut self, play_now: bool) {

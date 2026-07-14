@@ -35,7 +35,11 @@ impl MpvBackend {
         let child = std::process::Command::new("mpv")
             .arg("--idle")
             .arg("--no-video")
+            .arg("--really-quiet")
+            .arg("--no-terminal")
             .arg(format!("--input-ipc-server={}", socket_path))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .ok()?;
 
