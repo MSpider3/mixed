@@ -35,10 +35,7 @@ impl RodioBackend {
             OutputStream::try_from_device(&device).ok()
         });
 
-        let (stream, handle) = match stream_res {
-            Some(s) => s,
-            None => return None,
-        };
+        let (stream, handle) = stream_res?;
 
         let sink_res = run_with_high_priority(|| Sink::try_new(&handle));
         let sink = match sink_res {
