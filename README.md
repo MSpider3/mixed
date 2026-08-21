@@ -74,15 +74,17 @@ Album art is rendered directly in the terminal using high-performance image prot
 
 ## Installation
 
+> **Note:** `mixed` is distributed as a **standalone, self-contained binary** with all audio decoders, TUI components, and metadata parsers statically compiled in. It requires **no prior installation or runtime libraries**, except in rare cases (such as minimal headless Linux installations lacking ALSA runtime `libasound2`/`alsa-lib`, or Android Termux requiring `termux-api` for lockscreen widget controls).
+
 ### Method 1: Pre-compiled Binaries (Recommended)
 
 You can download the pre-compiled binary for your system from the **[Releases](../../releases)** page.
 
 #### Linux (x86_64)
-1. Download `mixed-v0.1.2-x86_64-unknown-linux-gnu.tar.gz`.
+1. Download `mixed-v0.1.4-x86_64-unknown-linux-gnu.tar.gz`.
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v0.1.2-x86_64-unknown-linux-gnu.tar.gz
+   tar -xzf mixed-v0.1.4-x86_64-unknown-linux-gnu.tar.gz
    ```
 3. Move the `mixed` binary to your system PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -91,10 +93,10 @@ You can download the pre-compiled binary for your system from the **[Releases](.
 4. Run the player by typing `mixed` in your terminal.
 
 #### macOS (Apple Silicon or Intel)
-1. Download either `mixed-v0.1.2-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v0.1.2-x86_64-apple-darwin.tar.gz` (Intel).
+1. Download either `mixed-v0.1.4-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v0.1.4-x86_64-apple-darwin.tar.gz` (Intel).
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v0.1.2-*.tar.gz
+   tar -xzf mixed-v0.1.4-*.tar.gz
    ```
 3. Move `mixed` to a directory in your PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -106,7 +108,7 @@ You can download the pre-compiled binary for your system from the **[Releases](.
    ```
 
 #### Windows (x86_64)
-1. Download `mixed-v0.1.2-x86_64-pc-windows-msvc.zip`.
+1. Download `mixed-v0.1.4-x86_64-pc-windows-msvc.zip`.
 2. Extract the `.zip` file.
 3. Move `mixed.exe` to a folder of your choice and run it in a terminal emulator (PowerShell, Command Prompt, or Git Bash).
 
@@ -116,10 +118,10 @@ You can download the pre-compiled binary for your system from the **[Releases](.
    pkg install termux-api
    ```
 2. Make sure you have the **Termux:API** application installed from F-Droid to enable widget interactions.
-3. Download `mixed-v0.1.2-aarch64-linux-android.tar.gz`.
+3. Download `mixed-v0.1.4-aarch64-linux-android.tar.gz`.
 4. Extract the binary inside Termux and make it executable:
    ```bash
-   tar -xzf mixed-v0.1.2-aarch64-linux-android.tar.gz
+   tar -xzf mixed-v0.1.4-aarch64-linux-android.tar.gz
    chmod +x mixed
    mv mixed $PREFIX/bin/
    ```
@@ -143,6 +145,28 @@ cargo build --release
 ```
 
 The release profile uses `opt-level = 3`, fat LTO, single codegen unit, and symbol stripping for maximum performance.
+
+---
+
+## CLI Usage
+
+```bash
+# Print help documentation
+mixed --help
+
+# Print version
+mixed --version
+
+# Open mixed with a specific music directory
+mixed ~/Music
+# or
+mixed --dir ~/Music
+
+# Directly play an audio file on startup
+mixed /path/to/song.mp3
+# or
+mixed --play /path/to/song.flac
+```
 
 ---
 
@@ -215,3 +239,10 @@ Contributions are welcome and deeply appreciated! Whether it's a performance twe
 This project is licensed under the **GNU General Public License v3.0** — see the [LICENSE](LICENSE) file for details.
 
 `mixed` is free software: you can redistribute it and/or modify it under the terms of the GNU GPL as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+---
+
+## Special Thanks
+
+A huge special thanks to **[kew](https://github.com/ravachol/kew)** by ravachol for the incredible inspiration and design architecture that made **mixed** possible!
+

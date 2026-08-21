@@ -18,6 +18,20 @@ use mixed::ui::events;
 use mixed::ui::layout;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse CLI options before any terminal setup or audio redirection
+    let cli_action = mixed::cli::CliOptions::parse(std::env::args());
+    let cli_opts = match cli_action {
+        mixed::cli::CliAction::Help => {
+            mixed::cli::print_help();
+            return Ok(());
+        }
+        mixed::cli::CliAction::Version => {
+            mixed::cli::print_version();
+            return Ok(());
+        }
+        mixed::cli::CliAction::Run(opts) => opts,
+    };
+
     #[cfg(target_os = "linux")]
     if std::env::var("MIXED_DEBUG").is_err() {
         silence_alsa();
@@ -37,8 +51,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         original_hook(info);
     }));
 
-    // Load configuration
-    let config = AppConfig::load();
+    // Load configuration and apply CLI overrides
+    let mut config = AppConfig::load();
+    if let Some(ref dir) = cli_opts.music_dir {
+        config.music_dir = Some(dir.to_string_lossy().to_string());
+    }
+
+    let initial_play_file = cli_opts.play_file;
 
     // Setup terminal
     enable_raw_mode()?;
@@ -139,7 +158,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             recv(player_rx) -> player_res => {
                 if let Ok(player) = player_res {
                     app.finalize_player_init(player);
-                    app.load_session();
+                    if let Some(ref target_file) = initial_play_file {
+                        if target_file.exists() {
+                            let meta = mixed::data::metadata::read_metadata(target_file);
+                            app.playlist.add(target_file.clone(), meta);
+                            app.playlist.current = app.playlist.len().saturating_sub(1);
+                            app.queue_cursor = app.playlist.current;
+                            app.active_panel = mixed::app::ActivePanel::NowPlaying;
+                            app.play_current();
+                        } else {
+                            app.load_session();
+                        }
+                    } else {
+                        app.load_session();
+                    }
                     app.refresh_needed = true;
                 }
             }

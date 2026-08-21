@@ -1,13 +1,12 @@
 #![cfg(not(target_os = "android"))]
 
-use std::io::BufReader;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 
+use crate::audio::symphonia_source::SymphoniaSource;
 use crate::audio::viz_source::{new_shared_buffer, SharedSampleBuffer, VisualizerSource};
 
 pub struct RodioBackend {
@@ -69,10 +68,7 @@ impl RodioBackend {
         self.sink.stop();
         self.current_path = Some(path.to_string());
 
-        let path_buf = PathBuf::from(path);
-        let file = std::fs::File::open(&path_buf).map_err(|e| e.to_string())?;
-        let reader = BufReader::new(file);
-        let source = Decoder::new(reader).map_err(|e| e.to_string())?;
+        let source = SymphoniaSource::open_file(path)?;
 
         let sr = source.sample_rate();
         let ch = source.channels();
@@ -93,7 +89,7 @@ impl RodioBackend {
                 self.sink.set_volume(self.volume as f32 / 100.0);
 
                 let viz_source = VisualizerSource::new(
-                    source.convert_samples::<f32>(),
+                    source,
                     self.sample_buffer.clone(),
                     self.skip_request.clone(),
                 );
@@ -172,36 +168,33 @@ impl RodioBackend {
                             self.sink = new_sink;
                             self.sink.set_volume(self.volume as f32 / 100.0);
 
-                            if let Ok(file) = std::fs::File::open(path) {
-                                let reader = BufReader::new(file);
-                                if let Ok(source) = Decoder::new(reader) {
-                                    let sr = source.sample_rate();
-                                    let ch = source.channels();
-                                    self.current_sample_rate = sr;
-                                    self.current_channels = ch;
+                            if let Ok(source) = SymphoniaSource::open_file(path) {
+                                let sr = source.sample_rate();
+                                let ch = source.channels();
+                                self.current_sample_rate = sr;
+                                self.current_channels = ch;
 
-                                    self.skip_request.store(0, Ordering::Release);
-                                    let samples_to_skip =
-                                        (pos_ms as f64 / 1000.0 * sr as f64 * ch as f64) as u64;
+                                self.skip_request.store(0, Ordering::Release);
+                                let samples_to_skip =
+                                    (pos_ms as f64 / 1000.0 * sr as f64 * ch as f64) as u64;
 
-                                    let viz_source = VisualizerSource::new(
-                                        source.convert_samples::<f32>(),
-                                        self.sample_buffer.clone(),
-                                        self.skip_request.clone(),
-                                    );
+                                let viz_source = VisualizerSource::new(
+                                    source,
+                                    self.sample_buffer.clone(),
+                                    self.skip_request.clone(),
+                                );
 
-                                    self.skip_request.store(samples_to_skip, Ordering::Release);
+                                self.skip_request.store(samples_to_skip, Ordering::Release);
 
-                                    self.sink.append(viz_source);
-                                    if !self.is_paused {
-                                        self.sink.play();
-                                        self.start_instant = Some(Instant::now());
-                                    } else {
-                                        self.sink.pause();
-                                        self.start_instant = None;
-                                    }
-                                    self.accumulated_ms = pos_ms;
+                                self.sink.append(viz_source);
+                                if !self.is_paused {
+                                    self.sink.play();
+                                    self.start_instant = Some(Instant::now());
+                                } else {
+                                    self.sink.pause();
+                                    self.start_instant = None;
                                 }
+                                self.accumulated_ms = pos_ms;
                             }
                         }
                     }
