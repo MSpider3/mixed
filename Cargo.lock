@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "mixed"
-version = "0.1.4"
+version = "1.4.1"
 dependencies = [
  "crossbeam-channel",
  "crossterm",

@@ -48,14 +48,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
     // Screen-size guard: the layout requires at least 90 columns to render correctly.
-    // On narrow terminals (e.g., portrait Android Termux), show a friendly prompt
-    // instead of squashing the two-pane layout into an unusable sliver.
+    // On narrow terminals, show a friendly prompt instead of squashing the two-pane layout.
     if size.width < 90 {
         let msg = format!(
-            "This application is optimized for landscape mode.\n\n\
+            "Terminal window is too narrow for two-pane layout.\n\n\
              Current terminal: {} \u{00d7} {}\n\
              Recommended: at least 90 \u{00d7} 30\n\n\
-             Please rotate your phone or increase the terminal width.",
+             Please increase the terminal width or maximize the window.",
             size.width, size.height
         );
         let widget = ratatui::widgets::Paragraph::new(msg)
@@ -367,41 +366,22 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_visualizer(f: &mut Frame, app: &mut App, area: Rect) {
-    #[cfg(not(target_os = "android"))]
-    {
-        // try_read() is non-blocking: if the FFT thread currently holds the write
-        // lock, we skip this frame rather than stalling the render loop (and
-        // indirectly blocking the audio decode path via mutex back-pressure).
-        if let Ok(bars) = app.visualizer_bars.try_read() {
-            match app.visualizer_mode {
-                VisualizerMode::Spectrum => {
-                    let scaled: Vec<u16> = bars
-                        .iter()
-                        .map(|&val| (val * (area.height as f32 * 8.0)) as u16)
-                        .collect();
-                    visualizer_widget::render_spectrum(f, area, &scaled, area.height);
-                }
-                VisualizerMode::Braille => {
-                    visualizer_widget::render_braille(f, area, &bars);
-                }
+    // try_read() is non-blocking: if the FFT thread currently holds the write
+    // lock, we skip this frame rather than stalling the render loop (and
+    // indirectly blocking the audio decode path via mutex back-pressure).
+    if let Ok(bars) = app.visualizer_bars.try_read() {
+        match app.visualizer_mode {
+            VisualizerMode::Spectrum => {
+                let scaled: Vec<u16> = bars
+                    .iter()
+                    .map(|&val| (val * (area.height as f32 * 8.0)) as u16)
+                    .collect();
+                visualizer_widget::render_spectrum(f, area, &scaled, area.height);
+            }
+            VisualizerMode::Braille => {
+                visualizer_widget::render_braille(f, area, &bars);
             }
         }
-    }
-    #[cfg(target_os = "android")]
-    {
-        let lines = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "~~ Visualizer Disabled on Android Termux ~~",
-                Style::default().fg(C_DIM).add_modifier(Modifier::ITALIC),
-            )),
-            Line::from(Span::styled(
-                "(Audio is routed through background MPV player)",
-                Style::default().fg(C_DIM).add_modifier(Modifier::ITALIC),
-            )),
-        ];
-        let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
-        f.render_widget(paragraph, area);
     }
 }
 

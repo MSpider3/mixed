@@ -5,6 +5,22 @@ All notable changes to the **mixed** music player will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-08-24
+
+### Fixed
+- **Visualizer Shared Sample Buffer Bug**:
+  - Fixed a regression where `RodioBackend` created an isolated, unshared audio sample buffer rather than writing into the `Player`'s shared sample buffer.
+  - Connected the real-time audio playback sample stream directly to the background FFT visualizer thread via `VisualizerSource`.
+  - Restored dynamic real-time frequency animations to both the **Spectrum Bar Visualizer** and the **Braille Dot Visualizer**.
+  - Added unit test `test_visualizer_pipeline_shared_buffer_and_fft` to verify continuous sample flow from `VisualizerSource` into `VisualizerEngine` frequency bars.
+
+### Changed
+- **Pure Desktop PC Architecture**:
+  - Completely removed Android/Termux experimental backends, scripts, and documentation in favor of a strictly optimized, unified PC desktop codebase (Linux, macOS, Windows).
+  - Streamlined `release.yml` GitHub Actions CI workflow to build optimized binaries for Linux x86_64, macOS Apple Silicon, macOS Intel, and Windows x86_64.
+
+---
+
 ## [0.1.4] - 2026-08-21
 
 ### Added
@@ -58,12 +74,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Synced LRC and unsynced lyrics parser with auto-scrolling.
 - Hybrid seek engine with backward fast-forwarding.
 - Keyboard shortcuts for playlist navigation and volume control.
-
----
-
-## [0.1.0] - 2026-05-01
-
-### Added
-- Initial release of `mixed` terminal music player written in Rust.
-- Core TUI interface powered by `ratatui` and `crossterm`.
-- Multi-format audio playback backend.

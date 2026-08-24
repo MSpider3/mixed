@@ -3,7 +3,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
 use crate::audio::player::Player;
-#[cfg(not(target_os = "android"))]
 use crate::audio::visualizer::VisualizerEngine;
 use crate::audio::visualizer::VisualizerMode;
 use crate::config::app_config::AppConfig;
@@ -85,10 +84,6 @@ pub struct App {
     pub pending_mpris_update: bool,
     pub last_mpris_trigger: Option<std::time::Instant>,
 
-    // -- Android Media (Android only) --
-    #[cfg(target_os = "android")]
-    pub android_media: Option<crate::sys::android_media::AndroidMediaHandle>,
-
     // -- Status message --
     pub status_msg: Option<String>,
     pub stopped: bool,
@@ -167,8 +162,6 @@ impl App {
             mpris_state: None,
             #[cfg(target_os = "linux")]
             mpris_update_tx: None,
-            #[cfg(target_os = "android")]
-            android_media: None,
             pending_mpris_update: false,
             last_mpris_trigger: None,
             status_msg: None,
@@ -202,15 +195,8 @@ impl App {
             app.mpris_update_tx = Some(mpris_update_tx);
         }
 
-        // Start Android media bridge (Android only)
-        #[cfg(target_os = "android")]
-        {
-            let handle = crate::sys::android_media::start_android_media(command_tx.clone());
-            app.android_media = Some(handle);
-        }
-
-        // Suppress unused warning on non-Linux, non-Android platforms
-        #[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
+        // Suppress unused warning on non-Linux platforms
+        #[cfg(not(target_os = "linux"))]
         let _ = command_tx;
 
         app
@@ -242,65 +228,62 @@ impl App {
     pub fn finalize_player_init(&mut self, mut player: Player) {
         player.set_volume(self.config.volume);
 
-        #[cfg(not(target_os = "android"))]
-        {
-            // Spawn background FFT visualizer thread.
-            // After each spectrum frame it fires a non-blocking try_send on vis_wake_tx
-            // so the main select! loop can immediately redraw the visualizer bars at
-            // ~30 fps (34 ms cadence) without the main tick needing to run that fast.
-            let visualizer_bars_clone = self.visualizer_bars.clone();
-            let sample_buffer = player.sample_buffer.clone();
-            let is_paused = player.is_paused.clone();
-            let is_playing = player.is_playing.clone();
-            // Clone the sender so the FFT thread owns it; the App retains a copy too.
-            let vis_wake_tx = self.vis_wake_tx.clone();
+        // Spawn background FFT visualizer thread.
+        // After each spectrum frame it fires a non-blocking try_send on vis_wake_tx
+        // so the main select! loop can immediately redraw the visualizer bars at
+        // ~30 fps (34 ms cadence) without the main tick needing to run that fast.
+        let visualizer_bars_clone = self.visualizer_bars.clone();
+        let sample_buffer = player.sample_buffer.clone();
+        let is_paused = player.is_paused.clone();
+        let is_playing = player.is_playing.clone();
+        // Clone the sender so the FFT thread owns it; the App retains a copy too.
+        let vis_wake_tx = self.vis_wake_tx.clone();
 
-            std::thread::spawn(move || {
-                let mut engine = VisualizerEngine::new(2048, 32);
-                static SILENCE: [f32; 2048] = [0.0f32; 2048];
-                // Pre-allocated scratch buffer reused every frame — eliminates the
-                // 8 KB Vec<f32> heap allocation that read_latest() previously caused
-                // ~30 times per second. (Item 9)
-                let mut sample_scratch = vec![0.0f32; 2048];
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(34));
+        std::thread::spawn(move || {
+            let mut engine = VisualizerEngine::new(2048, 32);
+            static SILENCE: [f32; 2048] = [0.0f32; 2048];
+            // Pre-allocated scratch buffer reused every frame — eliminates the
+            // 8 KB Vec<f32> heap allocation that read_latest() previously caused
+            // ~30 times per second. (Item 9)
+            let mut sample_scratch = vec![0.0f32; 2048];
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(34));
 
-                    let playing = is_playing.load(Ordering::Acquire);
-                    let paused = is_paused.load(Ordering::Acquire);
+                let playing = is_playing.load(Ordering::Acquire);
+                let paused = is_paused.load(Ordering::Acquire);
 
-                    if playing && !paused {
-                        if let Ok(buf) = sample_buffer.lock() {
-                            buf.read_latest_into(&mut sample_scratch);
-                            let sr = buf.sample_rate;
-                            drop(buf);
-                            engine.process(&sample_scratch, sr);
-                        }
+                if playing && !paused {
+                    if let Ok(buf) = sample_buffer.lock() {
+                        buf.read_latest_into(&mut sample_scratch);
+                        let sr = buf.sample_rate;
+                        drop(buf);
+                        engine.process(&sample_scratch, sr);
+                    }
+                } else {
+                    // Decay the visualizer bars by feeding silence.
+                    engine.process(&SILENCE, 44100);
+                }
+
+                // Publish the new bar data. try_write() is non-blocking:
+                // if the render loop currently holds a read lock (i.e., is
+                // actively drawing), we simply skip this write cycle rather
+                // than stalling the FFT thread and causing ALSA underruns.
+                if let Ok(mut shared) = visualizer_bars_clone.try_write() {
+                    if shared.len() == engine.bars.len() {
+                        shared.copy_from_slice(&engine.bars);
                     } else {
-                        // Decay the visualizer bars by feeding silence.
-                        engine.process(&SILENCE, 44100);
-                    }
-
-                    // Publish the new bar data. try_write() is non-blocking:
-                    // if the render loop currently holds a read lock (i.e., is
-                    // actively drawing), we simply skip this write cycle rather
-                    // than stalling the FFT thread and causing ALSA underruns.
-                    if let Ok(mut shared) = visualizer_bars_clone.try_write() {
-                        if shared.len() == engine.bars.len() {
-                            shared.copy_from_slice(&engine.bars);
-                        } else {
-                            *shared = engine.bars.clone();
-                        }
-                    }
-
-                    // Wake up the main render loop. try_send is non-blocking and
-                    // discards the signal if the channel is already full (bounded(1)),
-                    // which naturally rate-limits wake-ups to one per render cycle.
-                    if let Some(ref tx) = vis_wake_tx {
-                        let _ = tx.try_send(());
+                        *shared = engine.bars.clone();
                     }
                 }
-            });
-        }
+
+                // Wake up the main render loop. try_send is non-blocking and
+                // discards the signal if the channel is already full (bounded(1)),
+                // which naturally rate-limits wake-ups to one per render cycle.
+                if let Some(ref tx) = vis_wake_tx {
+                    let _ = tx.try_send(());
+                }
+            }
+        });
 
         self.player = Some(player);
         self.player_loading = false;
@@ -572,7 +555,6 @@ impl App {
                         self.generate_cover_art_protocol();
                         self.push_mpris_metadata();
                         self.push_mpris_playback();
-                        self.update_android_notification();
 
                         // Sync queue cursor with currently playing track
                         self.queue_cursor = self.playlist.current_real_index().unwrap_or(0);
@@ -629,7 +611,6 @@ impl App {
             p.play()
         };
         self.push_mpris_playback();
-        self.update_android_notification();
         self.refresh_needed = true;
     }
 
@@ -647,7 +628,6 @@ impl App {
             p.stop()
         };
         self.push_mpris_playback();
-        self.clear_android_notification();
         self.refresh_needed = true;
     }
 
@@ -934,30 +914,6 @@ impl App {
     fn push_mpris_position(&mut self) {}
 
     // ── Android notification helpers ──────────────────────────────────────────
-
-    #[cfg(target_os = "android")]
-    pub fn update_android_notification(&self) {
-        if let Some(ref handle) = self.android_media {
-            if let Some(ref meta) = self.now_playing_meta {
-                let title = meta.display_title(self.config.strip_track_numbers);
-                let artist = meta.display_artist();
-                handle.push_metadata(&title, &artist);
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub fn update_android_notification(&self) {}
-
-    #[cfg(target_os = "android")]
-    pub fn clear_android_notification(&self) {
-        if let Some(ref handle) = self.android_media {
-            handle.shutdown();
-        }
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub fn clear_android_notification(&self) {}
 
     /// Enqueue the selected library entry.
     pub fn library_enqueue_selected(&mut self, play_now: bool) {

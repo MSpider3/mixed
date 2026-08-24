@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Set up crossbeam event channels for media commands (MPRIS on Linux, termux on Android)
+    // Set up crossbeam event channels for media commands (MPRIS on Linux)
     let (media_cmd_tx, media_cmd_rx) = crossbeam_channel::unbounded::<MediaCommand>();
 
     // Bounded(1) wake-up channel: the FFT visualizer thread fires try_send() after
@@ -322,7 +322,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Save state before exit
     app.save_state();
     app.config.save();
-    app.clear_android_notification();
 
     // Signal MPRIS background thread to release the D-Bus name gracefully.
     // Dropping update_tx closes the channel; the tokio select loop will also

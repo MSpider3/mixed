@@ -4,7 +4,6 @@
 ![Ratatui](https://img.shields.io/badge/TUI-Ratatui-blue?logo=terminal&logoColor=white)
 ![Rodio](https://img.shields.io/badge/Audio-Rodio%20%2F%20Symphonia-purple?logo=audacity&logoColor=white)
 ![Linux](https://img.shields.io/badge/Platform-Linux-green?logo=linux&logoColor=white)
-![Android Termux](https://img.shields.io/badge/Platform-Android%20Termux-brightgreen?logo=android&logoColor=white)
 ![macOS](https://img.shields.io/badge/Platform-macOS-lightgrey?logo=apple&logoColor=white)
 ![Windows](https://img.shields.io/badge/Platform-Windows-blue?logo=windows&logoColor=white)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
@@ -19,15 +18,12 @@
 
 This project was born from a desire to push beyond what's possible with a C foundation:
 
-- **Design Overhaul** — A unique high-contrast **Neon-Noir / Material You** aesthetic with Sixel album art rendering, braille-dot visualizers, and a deeply customizable layout system.
-- **Lock-Free Concurrency** — All cross-thread state synchronization uses atomic primitives (`AtomicBool`, `AtomicU64`, `AtomicU8`) instead of mutexes, eliminating contention on the audio hot-path.
-- **Native Android Integration** — Asynchronous Termux widget control via Unix Domain Socket IPC, giving Android 13+ users lock-screen notification media buttons without rooting.
+- **Design Overhaul** — A unique high-contrast **Neon-Noir / Material You** aesthetic with Sixel album art rendering, real-time spectrum & braille visualizers, and a deeply customizable layout system.
+- **Lock-Free Concurrency** — Cross-thread state synchronization uses atomic primitives (`AtomicBool`, `AtomicU64`, `AtomicU8`) instead of mutexes, eliminating contention on the audio hot-path.
+- **Native MPRIS Media Controls** — Full MPRIS D-Bus integration for Linux desktop environments (GNOME, KDE, Sway, Waybar, playerctl).
 - **High-Performance Rendering** — Sixel image pooling with XDG-cached cover art protocols, zero-allocation FFT spectrum frames, and an adaptive rendering loop that idles at 0% CPU when paused.
 
-**The Real Reason** - I started this project at the beginning of Janunary 2026 as part of my new year resolution that after learning rust of more than 6 months I will try to build a major project on my own in rust. *'kew'* was major inspiration to try build a minimilist music player with things I like (kew had everything I like), but I wanted to try build it on my own for practice.
-After 5 months the project was looking and working as intented with the plan and idea I had in mind, but there were many issue that I wasn't able to solve so I finanlly used AI for the help.
-but I'm proud that build almost 70-75% of the project on my own just using Google search, looking at other rust based music players, documentaions and the old way of wrtting code.
-But when I stuck for weeks without progess I finally used AI for helping and writting code. It didn't feel that good when I was working on the project myself but at the same time I was happy to finally see some progess on my stagnat project.
+**The Real Reason** - I started this project at the beginning of January 2026 as part of my new year resolution that after learning Rust for more than 6 months I will try to build a major project on my own in Rust. *'kew'* was major inspiration to try build a minimalist music player with things I like, but I wanted to try build it on my own for practice.
 
 ---
 
@@ -55,14 +51,11 @@ Powered by **Rodio** and **Symphonia** with lock-free, zero-allocation sample tr
 ### ⏩ Hybrid Seek System
 Bulletproof seeking that natively calls `try_seek()` on indexed audio formats (FLAC, WAV) and seamlessly falls back to a **sample-discarding iterator** for unseekable or variable-bitrate files (MP3, Ogg). Backward seeks gracefully reopen the decoder and fast-forward via atomic `skip_request` counters — no stalls, no glitches.
 
-### 📱 Cross-Platform Background Media Controls
-Full **MPRIS D-Bus** integration for Linux compositors (GNOME, KDE, Sway) with real-time `PropertiesChanged` signal emission for metadata, playback status, volume, shuffle, and loop state. On Android, a native **IPC proxy bridge** using `termux-notification` maps ⏮/⏯/⏭ button taps to Unix Domain Socket commands for lock-screen widget control.
+### 🐧 MPRIS Background Media Controls (Linux)
+Full **MPRIS D-Bus** integration for Linux compositors (GNOME, KDE, Sway, Hyprland) with real-time `PropertiesChanged` signal emission for metadata, playback status, volume, shuffle, and loop state.
 
 ### ⚡ Zero-Spin Event Loop
 Intelligent, adaptive rendering powered by `crossbeam_channel::select!` multiplexing. The visualizer thread fires wake-up signals at **~30 fps** (34ms cadence) through a `bounded(1)` channel when music is playing. When idle, the FFT thread decays to silence and the main loop drops to **near 0% CPU** — no busy-waiting, no wasted cycles.
-
-### 📐 Responsive Screen Guard
-Dynamic terminal size checking that automatically shifts to a minimal portrait notification on narrow screens (e.g., phones in Termux). Resize events are debounced at 100ms to prevent thrashing, and Sixel cover art is re-scaled on every confirmed resize.
 
 ### 🎨 Native Terminal Theme Integration
 **mixed** inherits standard ANSI color palette codes and uses `Color::Reset` for default text. This means the player automatically respects and adapts to your terminal emulator's custom theme (e.g. Catppuccin, Gruvbox, Nord, Dracula) for a consistent, native desktop look.
@@ -74,17 +67,17 @@ Album art is rendered directly in the terminal using high-performance image prot
 
 ## Installation
 
-> **Note:** `mixed` is distributed as a **standalone, self-contained binary** with all audio decoders, TUI components, and metadata parsers statically compiled in. It requires **no prior installation or runtime libraries**, except in rare cases (such as minimal headless Linux installations lacking ALSA runtime `libasound2`/`alsa-lib`, or Android Termux requiring `termux-api` for lockscreen widget controls).
+> **Note:** `mixed` is distributed as a **standalone, self-contained binary** with all audio decoders, TUI components, and metadata parsers statically compiled in. It requires **no prior installation or runtime libraries** (except standard ALSA libraries on minimal headless Linux distributions).
 
 ### Method 1: Pre-compiled Binaries (Recommended)
 
 You can download the pre-compiled binary for your system from the **[Releases](../../releases)** page.
 
 #### Linux (x86_64)
-1. Download `mixed-v0.1.4-x86_64-unknown-linux-gnu.tar.gz`.
+1. Download `mixed-v1.4.1-x86_64-unknown-linux-gnu.tar.gz`.
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v0.1.4-x86_64-unknown-linux-gnu.tar.gz
+   tar -xzf mixed-v1.4.1-x86_64-unknown-linux-gnu.tar.gz
    ```
 3. Move the `mixed` binary to your system PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -93,10 +86,10 @@ You can download the pre-compiled binary for your system from the **[Releases](.
 4. Run the player by typing `mixed` in your terminal.
 
 #### macOS (Apple Silicon or Intel)
-1. Download either `mixed-v0.1.4-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v0.1.4-x86_64-apple-darwin.tar.gz` (Intel).
+1. Download either `mixed-v1.4.1-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v1.4.1-x86_64-apple-darwin.tar.gz` (Intel).
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v0.1.4-*.tar.gz
+   tar -xzf mixed-v1.4.1-*.tar.gz
    ```
 3. Move `mixed` to a directory in your PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -108,23 +101,9 @@ You can download the pre-compiled binary for your system from the **[Releases](.
    ```
 
 #### Windows (x86_64)
-1. Download `mixed-v0.1.4-x86_64-pc-windows-msvc.zip`.
+1. Download `mixed-v1.4.1-x86_64-pc-windows-msvc.zip`.
 2. Extract the `.zip` file.
-3. Move `mixed.exe` to a folder of your choice and run it in a terminal emulator (PowerShell, Command Prompt, or Git Bash).
-
-#### Android (Termux)
-1. Install the `termux-api` package in Termux:
-   ```bash
-   pkg install termux-api
-   ```
-2. Make sure you have the **Termux:API** application installed from F-Droid to enable widget interactions.
-3. Download `mixed-v0.1.4-aarch64-linux-android.tar.gz`.
-4. Extract the binary inside Termux and make it executable:
-   ```bash
-   tar -xzf mixed-v0.1.4-aarch64-linux-android.tar.gz
-   chmod +x mixed
-   mv mixed $PREFIX/bin/
-   ```
+3. Move `mixed.exe` to a folder of your choice and run it in a terminal emulator (Windows Terminal, PowerShell, or Command Prompt).
 
 ---
 
@@ -197,52 +176,8 @@ mixed --play /path/to/song.flac
 | `v` | Toggle spectrum/braille visualizer mode | Display |
 | `m` | Toggle full lyrics / 3-line timed lyrics view | Display |
 
-### Help Panel
-![Help Tab](docs/help_tab.png)
-
----
-
-## Future Roadmap
-
-- [ ] 🎵 **Spotify Integration** — Native account streaming with an ultra-minimalist layout interface that preserves the terminal-first experience.
-
-- [ ] 📺 **YouTube Music Integration** — Direct streaming playback mapped to background process queues, bringing the full YTM catalog into your terminal.
-
-- [ ] ☁️ **Cloud Streaming Architecture** — Universal hooks for streaming external media repositories without local cache bloat. Pluggable provider backends with a unified `Source` trait.
-
-- [ ] 🎨 **Theme Engine** — User-defined TOML theme files with hot-reload support for full color palette and layout customization.
-
-- [ ] 🔌 **Plugin System** — Lua/WASM-based extension API for community-built visualizers, metadata scrapers, and scrobbler integrations.
-
----
-
-## Contributing
-
-Contributions are welcome and deeply appreciated! Whether it's a performance tweak, a bug fix, a new theme module, or a documentation improvement — every PR makes **mixed** better.
-
-**How to contribute:**
-
-1. **Open an Issue** — Found a bug or have a feature idea? Start by [opening an issue](../../issues) so we can discuss the approach.
-2. **Fork & Branch** — Fork the repository, create a feature branch (`feature/your-feature`), and develop your changes.
-3. **Submit a Pull Request** — Open a PR against `main` with a clear description of your changes. Include screenshots for UI changes and benchmark numbers for performance work.
-
-**Areas where help is especially welcome:**
-- 🐧 **Platform testing** — macOS, Windows, and exotic terminal emulators
-- 🎨 **Theme contributions** — Custom color palettes and layout presets
-- 🌐 **Internationalization** — Non-ASCII filename handling edge cases
-- 📊 **Performance profiling** — Flamegraphs, memory analysis, latency benchmarks
-
 ---
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0** — see the [LICENSE](LICENSE) file for details.
-
-`mixed` is free software: you can redistribute it and/or modify it under the terms of the GNU GPL as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-
----
-
-## Special Thanks
-
-A huge special thanks to **[kew](https://github.com/ravachol/kew)** by ravachol for the incredible inspiration and design architecture that made **mixed** possible!
-
+This project is licensed under the **GNU General Public License v3.0 (GPLv3)** — see the [LICENSE](LICENSE) file for details.

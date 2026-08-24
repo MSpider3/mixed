@@ -1,7 +1,6 @@
 /// Platform-agnostic media commands sent from OS media controls → App event loop.
 ///
-/// Both the Linux MPRIS/D-Bus backend and the Android termux-api backend
-/// map their respective OS signals into this enum, so `app.rs` and `main.rs`
+/// The Linux MPRIS/D-Bus backend maps OS signals into this enum, so `app.rs` and `main.rs`
 /// contain zero inline `#[cfg]` blocks for command dispatch.
 #[derive(Debug, Clone)]
 pub enum MediaCommand {
@@ -26,7 +25,3 @@ pub enum MediaCommand {
 /// Linux: Full MPRIS2 D-Bus service (playerctl, GNOME media controls, etc.)
 #[cfg(target_os = "linux")]
 pub mod mpris;
-
-/// Android: termux-notification lock-screen widget + Unix domain socket IPC.
-#[cfg(target_os = "android")]
-pub mod android_media;

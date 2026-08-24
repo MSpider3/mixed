@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crossbeam_channel::{bounded, Sender};
 
-#[cfg(not(target_os = "android"))]
+use crate::audio::rodio_backend::RodioBackend;
 use crate::audio::viz_source::SharedSampleBuffer;
 
 /// Commands sent to the background player thread.
@@ -21,121 +21,61 @@ pub enum PlayerCmd {
 }
 
 /// Unified audio backend router.
-pub enum AudioBackend {
-    #[cfg(not(target_os = "android"))]
-    Rodio(crate::audio::rodio_backend::RodioBackend),
-    #[cfg(target_os = "android")]
-    Mpv(crate::audio::mpv_backend::MpvBackend),
-}
+pub struct AudioBackend(RodioBackend);
 
 impl AudioBackend {
-    pub fn new() -> Option<Self> {
-        #[cfg(not(target_os = "android"))]
-        {
-            crate::audio::rodio_backend::RodioBackend::new().map(AudioBackend::Rodio)
-        }
-        #[cfg(target_os = "android")]
-        {
-            crate::audio::mpv_backend::MpvBackend::new().map(AudioBackend::Mpv)
-        }
+    pub fn new(sample_buffer: SharedSampleBuffer) -> Option<Self> {
+        RodioBackend::new(sample_buffer).map(AudioBackend)
     }
 
     pub fn play(&mut self, path: &str) -> Result<(), String> {
-        match self {
-            #[cfg(not(target_os = "android"))]
-            AudioBackend::Rodio(r) => r.play(path),
-            #[cfg(target_os = "android")]
-            AudioBackend::Mpv(m) => m.play(path),
-        }
+        self.0.play(path)
     }
 
     pub fn pause(&mut self) {
-        match self {
-            #[cfg(not(target_os = "android"))]
-            AudioBackend::Rodio(r) => r.pause(),
-            #[cfg(target_os = "android")]
-            AudioBackend::Mpv(m) => m.pause(),
-        }
+        self.0.pause();
     }
 
     pub fn resume(&mut self) {
-        match self {
-            #[cfg(not(target_os = "android"))]
-            AudioBackend::Rodio(r) => r.resume(),
-            #[cfg(target_os = "android")]
-            AudioBackend::Mpv(m) => m.resume(),
-        }
+        self.0.resume();
     }
 
     pub fn seek_to(&mut self, target: std::time::Duration) {
-        match self {
-            #[cfg(not(target_os = "android"))]
-            AudioBackend::Rodio(r) => r.seek_to(target),
-            #[cfg(target_os = "android")]
-            AudioBackend::Mpv(m) => m.seek_to(target),
-        }
+        self.0.seek_to(target);
     }
 
     pub fn get_position(&mut self) -> std::time::Duration {
-        match self {
-            #[cfg(not(target_os = "android"))]
-            AudioBackend::Rodio(r) => r.get_position(),
-            #[cfg(target_os = "android")]
-            AudioBackend::Mpv(m) => m.get_position(),
-        }
+        self.0.get_position()
     }
 
     pub fn stop(&mut self) {
-        match self {
-            #[cfg(not(target_os = "android"))]
-            AudioBackend::Rodio(r) => r.stop(),
-            #[cfg(target_os = "android")]
-            AudioBackend::Mpv(m) => m.stop(),
-        }
+        self.0.stop();
     }
 
     pub fn set_volume(&mut self, volume: u8) {
-        match self {
-            #[cfg(not(target_os = "android"))]
-            AudioBackend::Rodio(r) => r.set_volume(volume),
-            #[cfg(target_os = "android")]
-            AudioBackend::Mpv(m) => m.set_volume(volume),
-        }
+        self.0.set_volume(volume);
     }
 
     pub fn get_volume(&mut self) -> Option<u8> {
-        match self {
-            #[cfg(not(target_os = "android"))]
-            AudioBackend::Rodio(r) => r.get_volume(),
-            #[cfg(target_os = "android")]
-            AudioBackend::Mpv(m) => m.get_volume(),
-        }
+        self.0.get_volume()
     }
 
     pub fn get_duration(&mut self) -> Option<std::time::Duration> {
-        match self {
-            #[cfg(not(target_os = "android"))]
-            AudioBackend::Rodio(r) => r.get_duration(),
-            #[cfg(target_os = "android")]
-            AudioBackend::Mpv(m) => m.get_duration(),
-        }
+        self.0.get_duration()
     }
 
     pub fn is_finished(&mut self) -> bool {
-        match self {
-            #[cfg(not(target_os = "android"))]
-            AudioBackend::Rodio(r) => r.is_finished(),
-            #[cfg(target_os = "android")]
-            AudioBackend::Mpv(m) => m.is_finished(),
-        }
+        self.0.is_finished()
+    }
+
+    pub fn current_sample_rate(&self) -> u32 {
+        self.0.current_sample_rate
     }
 }
 
 /// Thread-isolated audio player wrapping AudioBackend.
 pub struct Player {
     cmd_tx: Sender<PlayerCmd>,
-
-    #[cfg(not(target_os = "android"))]
     pub sample_buffer: SharedSampleBuffer,
 
     // Shared atomic states.
@@ -160,7 +100,6 @@ impl Player {
         let total_duration_ms = Arc::new(AtomicU64::new(0));
         let current_sample_rate = Arc::new(AtomicU32::new(44100));
 
-        #[cfg(not(target_os = "android"))]
         let sample_buffer = crate::audio::viz_source::new_shared_buffer(4096);
 
         let is_paused_clone = is_paused.clone();
@@ -170,9 +109,10 @@ impl Player {
         let elapsed_ms_clone = elapsed_ms.clone();
         let total_duration_ms_clone = total_duration_ms.clone();
         let current_sample_rate_clone = current_sample_rate.clone();
+        let sample_buffer_clone = sample_buffer.clone();
 
         std::thread::spawn(move || {
-            let mut backend = match AudioBackend::new() {
+            let mut backend = match AudioBackend::new(sample_buffer_clone) {
                 Some(b) => b,
                 None => return,
             };
@@ -227,13 +167,6 @@ impl Player {
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 }
 
-                #[cfg(target_os = "android")]
-                {
-                    if let AudioBackend::Mpv(ref mut m) = backend {
-                        m.poll_status();
-                    }
-                }
-
                 // Update elapsed tracking
                 let elapsed = backend.get_position();
                 elapsed_ms_clone.store(elapsed.as_millis() as u64, Ordering::Relaxed);
@@ -255,19 +188,12 @@ impl Player {
                     volume_clone.store(vol, Ordering::Relaxed);
                 }
 
-                #[cfg(not(target_os = "android"))]
-                {
-                    #[allow(irrefutable_let_patterns)]
-                    if let AudioBackend::Rodio(ref r) = backend {
-                        current_sample_rate_clone.store(r.current_sample_rate, Ordering::Relaxed);
-                    }
-                }
+                current_sample_rate_clone.store(backend.current_sample_rate(), Ordering::Relaxed);
             }
         });
 
         Some(Self {
             cmd_tx,
-            #[cfg(not(target_os = "android"))]
             sample_buffer,
             is_paused,
             is_playing,

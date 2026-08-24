@@ -12,44 +12,30 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.experimental }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ── Linux x86_64 (primary) ──────────────────────────────────────────
+          # ── Linux x86_64 ────────────────────────────────────────────────────
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             tool: cargo
-            experimental: false
-
-          # ── Android Termux aarch64 ──────────────────────────────────────────
-          # Marked experimental: Android NDK linker setup in standard runners
-          # is fragile. The binary requires termux-api on the device.
-          - target: aarch64-linux-android
-            runner: ubuntu-latest
-            tool: cross
-            experimental: true
 
           # ── macOS Intel ─────────────────────────────────────────────────────
           - target: x86_64-apple-darwin
             runner: macos-latest
             tool: cargo
-            experimental: false
 
           # ── macOS Apple Silicon ─────────────────────────────────────────────
           - target: aarch64-apple-darwin
             runner: macos-latest
             tool: cargo
-            experimental: false
 
           # ── Windows x86_64 ──────────────────────────────────────────────────
-          # No MPRIS/D-Bus; zbus/tokio are not compiled in (linux-only target deps).
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             tool: cargo
-            experimental: false
 
     steps:
       - name: Checkout
@@ -71,11 +57,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      # Install `cross` only for targets that need it (Linux cross-compilation)
-      - name: Install cross
-        if: matrix.tool == 'cross'
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
       # Install Linux audio dev libraries for native linux builds
       - name: Install Linux audio dependencies
         if: matrix.runner == 'ubuntu-latest'
@@ -86,12 +67,7 @@ jobs:
             pkg-config \
             libdbus-1-dev
 
-      - name: Build (cross)
-        if: matrix.tool == 'cross'
-        run: cross build --release --target ${{ matrix.target }}
-
       - name: Build (cargo)
-        if: matrix.tool == 'cargo'
         run: cargo build --release --target ${{ matrix.target }}
 
       # Determine binary extension (.exe on Windows, none elsewhere)
@@ -123,13 +99,27 @@ jobs:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     needs: build
-    if: always()  # run even if some experimental builds failed
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
+
+      - name: Generate Release Notes from CHANGELOG.md
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -n "/^## \\[$VERSION\\]/,/^---/p" CHANGELOG.md | sed '$d' > release_notes.md || true
+
+          if [ ! -s release_notes.md ]; then
+            echo "## mixed $GITHUB_REF_NAME" > release_notes.md
+          fi
+
+          printf "\n---\n\n### 📦 Downloads\n\n| Platform | Archive |\n|---|---|\n| **Linux (x86_64)** | \`mixed-*-x86_64-unknown-linux-gnu.tar.gz\` |\n| **macOS (Apple Silicon)** | \`mixed-*-aarch64-apple-darwin.tar.gz\` |\n| **macOS (Intel)** | \`mixed-*-x86_64-apple-darwin.tar.gz\` |\n| **Windows (x86_64)** | \`mixed-*-x86_64-pc-windows-msvc.zip\` |\n" >> release_notes.md
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -138,17 +128,5 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: dist/**/*
-          body: |
-            ## mixed ${{ github.ref_name }}
-
-            ### Downloads
-            | Platform | File |
-            |---|---|
-            | Linux x86_64 | `mixed-*-x86_64-unknown-linux-gnu.tar.gz` |
-            | macOS Intel | `mixed-*-x86_64-apple-darwin.tar.gz` |
-            | macOS Apple Silicon | `mixed-*-aarch64-apple-darwin.tar.gz` |
-            | Windows x86_64 | `mixed-*-x86_64-pc-windows-msvc.zip` |
-            | Android Termux aarch64 | `mixed-*-aarch64-linux-android.tar.gz` *(experimental)* |
-
-            ### Android (Termux) Notes
-            Requires `termux-api` app installed and `pkg install termux-api` in Termux.
+          body_path: release_notes.md
+          generate_release_notes: true

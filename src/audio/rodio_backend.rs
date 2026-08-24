@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "android"))]
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,7 +5,7 @@ use std::time::{Duration, Instant};
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 
 use crate::audio::symphonia_source::SymphoniaSource;
-use crate::audio::viz_source::{new_shared_buffer, SharedSampleBuffer, VisualizerSource};
+use crate::audio::viz_source::{SharedSampleBuffer, VisualizerSource};
 
 pub struct RodioBackend {
     sink: Sink,
@@ -26,8 +24,11 @@ pub struct RodioBackend {
 }
 
 impl RodioBackend {
-    pub fn new() -> Option<Self> {
+    pub fn new(sample_buffer: SharedSampleBuffer) -> Option<Self> {
         let stream_res = run_with_high_priority(|| {
+            if let Ok(res) = OutputStream::try_default() {
+                return Some(res);
+            }
             use rodio::cpal::traits::HostTrait;
             let host = rodio::cpal::default_host();
             let device = host.default_output_device()?;
@@ -44,7 +45,6 @@ impl RodioBackend {
 
         sink.set_volume(0.8);
 
-        let sample_buffer = new_shared_buffer(4096);
         let skip_request = Arc::new(AtomicU64::new(0));
 
         Some(Self {

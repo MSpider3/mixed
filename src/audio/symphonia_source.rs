@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "android"))]
-
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
