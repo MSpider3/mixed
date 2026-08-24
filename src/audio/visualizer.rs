@@ -176,10 +176,10 @@ fn map_to_bars_inplace(magnitudes: &[f32], bars: &mut [f32], sample_rate: u32, f
     let octave_fraction = 1.0f32 / 3.0f32;
     let factor = 2.0f32.powf(octave_fraction);
 
-    for bar_idx in 0..num_bars {
+    for (bar_idx, bar) in bars.iter_mut().enumerate() {
         let center_freq = min_freq * factor.powi(bar_idx as i32);
         if center_freq > nyquist {
-            bars[bar_idx] = 0.0;
+            *bar = 0.0;
             continue;
         }
 
@@ -191,8 +191,8 @@ fn map_to_bars_inplace(magnitudes: &[f32], bars: &mut [f32], sample_rate: u32, f
 
         let mut sum = 0.0f32;
         let mut count = 0;
-        for bin in lower_bin..=upper_bin {
-            sum += magnitudes[bin];
+        for &mag in &magnitudes[lower_bin..=upper_bin] {
+            sum += mag;
             count += 1;
         }
 
@@ -210,6 +210,6 @@ fn map_to_bars_inplace(magnitudes: &[f32], bars: &mut [f32], sample_rate: u32, f
 
         // Pink noise EQ curve compensation (boost highs by ~3dB/octave)
         let eq_boost = 1.0 + (bar_idx as f32 / num_bars as f32) * 0.6;
-        bars[bar_idx] = (norm * eq_boost).clamp(0.0, 1.0);
+        *bar = (norm * eq_boost).clamp(0.0, 1.0);
     }
 }
