@@ -8,11 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.4.1] - 2026-08-24
 
 ### Fixed
-- **Visualizer Shared Sample Buffer Bug**:
+- **Visualizer Shared Sample Buffer & Calibration Bug**:
   - Fixed a regression where `RodioBackend` created an isolated, unshared audio sample buffer rather than writing into the `Player`'s shared sample buffer.
-  - Connected the real-time audio playback sample stream directly to the background FFT visualizer thread via `VisualizerSource`.
-  - Restored dynamic real-time frequency animations to both the **Spectrum Bar Visualizer** and the **Braille Dot Visualizer**.
-  - Added unit test `test_visualizer_pipeline_shared_buffer_and_fft` to verify continuous sample flow from `VisualizerSource` into `VisualizerEngine` frequency bars.
+  - Corrected FFT magnitude normalization by calibrating against Blackman-Harris window coherent gain, resolving the issue where bars saturated at maximum height on song start.
+  - Implemented 32 logarithmic musical frequency bands (25 Hz - 18 kHz) across the entire spectrum.
+  - Introduced hybrid peak/RMS transient detection with dynamic range expansion (`x^1.35`) and snappy attack / fluid decay ballistics to ensure bars bounce dynamically with the beat and rhythm.
+  - Enhanced Braille visualizer with 8-dot vertical resolution patterns for continuous waveform rendering.
+  - Added unit test suite in `tests/audio_playback_tests.rs` for visualizer frequency selectivity, silence decay, and sample pipeline flow.
 
 ### Changed
 - **Pure Desktop PC Architecture**:

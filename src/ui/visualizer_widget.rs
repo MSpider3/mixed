@@ -128,7 +128,10 @@ pub fn render_spectrum(f: &mut Frame, area: Rect, bars: &[u16], max_height: u16)
     f.render_widget(widget, area);
 }
 
-/// Render braille waveform visualizer using Canvas-style dots.
+/// Multi-level braille characters representing 0 to 8 dot levels of fill.
+const BRAILLE_LEVELS: &[char] = &[' ', '⡀', '⡄', '⡆', '⡇', '⣇', '⣧', '⣷', '⣿'];
+
+/// Render braille waveform visualizer using high-resolution dot characters.
 pub fn render_braille(f: &mut Frame, area: Rect, bars: &[f32]) {
     if area.height == 0 || area.width == 0 || bars.is_empty() {
         return;
@@ -137,27 +140,31 @@ pub fn render_braille(f: &mut Frame, area: Rect, bars: &[f32]) {
     let width = area.width as usize;
     let height = area.height as usize;
 
-    // Map normalized bars to braille characters
     let mut lines: Vec<Line> = Vec::with_capacity(height);
 
     for row in 0..height {
         let row_from_bottom = height - 1 - row;
-        let threshold = row_from_bottom as f32 / height as f32;
-        // Pre-allocate space for 3-byte braille characters or 1-byte space characters.
-        // On average, width * 2 bytes is a very safe estimate.
+        let cell_bottom = row_from_bottom as f32 / height as f32;
+        let cell_top = (row_from_bottom + 1) as f32 / height as f32;
+        let cell_height = cell_top - cell_bottom;
+
         let mut text = String::with_capacity(width * 3);
 
         for col in 0..width {
             let bar_idx = (col * bars.len()) / width;
             let value = bars.get(bar_idx).copied().unwrap_or(0.0);
 
-            if value > threshold {
-                text.push('⣿');
-            } else if value > threshold - 0.1 {
-                text.push('⡇');
+            let ch = if value <= cell_bottom || cell_height <= 0.0 {
+                ' '
+            } else if value >= cell_top {
+                '⣿'
             } else {
-                text.push(' ');
-            }
+                let frac = ((value - cell_bottom) / cell_height).clamp(0.0, 1.0);
+                let level = (frac * 8.0).round() as usize;
+                BRAILLE_LEVELS[level.min(8)]
+            };
+
+            text.push(ch);
         }
 
         let color_ratio = row as f32 / height as f32;

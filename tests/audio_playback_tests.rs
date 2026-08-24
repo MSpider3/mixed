@@ -45,6 +45,92 @@ fn test_symphonia_source_nonexistent_file() {
 }
 
 #[test]
+fn test_visualizer_silence_decays_to_zero() {
+    let mut engine = VisualizerEngine::new(2048, 32);
+    let silence = vec![0.0f32; 2048];
+
+    // Process silence for 10 frames
+    for _ in 0..10 {
+        engine.process(&silence, 44100);
+    }
+
+    // All bars should be exactly 0.0 on silence
+    let max_bar = engine
+        .bars
+        .iter()
+        .cloned()
+        .fold(0.0f32, |acc, x| acc.max(x));
+    assert_eq!(
+        max_bar, 0.0,
+        "Visualizer should have 0.0 bar height during silence"
+    );
+}
+
+#[test]
+fn test_visualizer_bass_vs_treble_frequency_selectivity() {
+    let mut bass_engine = VisualizerEngine::new(2048, 32);
+    let mut treble_engine = VisualizerEngine::new(2048, 32);
+
+    // 60 Hz bass kick tone
+    let bass_samples: Vec<f32> = (0..2048)
+        .map(|i| (2.0 * std::f32::consts::PI * 60.0 * (i as f32 / 44100.0)).sin() * 0.7)
+        .collect();
+
+    // 6000 Hz treble / cymbal tone
+    let treble_samples: Vec<f32> = (0..2048)
+        .map(|i| (2.0 * std::f32::consts::PI * 6000.0 * (i as f32 / 44100.0)).sin() * 0.7)
+        .collect();
+
+    // Feed samples through engines
+    for _ in 0..5 {
+        bass_engine.process(&bass_samples, 44100);
+        treble_engine.process(&treble_samples, 44100);
+    }
+
+    // Bass engine should have strong energy in lower bars (0..8) and low energy in treble bars (20..31)
+    let bass_low_max = bass_engine.bars[0..8]
+        .iter()
+        .cloned()
+        .fold(0.0f32, f32::max);
+    let bass_high_max = bass_engine.bars[20..32]
+        .iter()
+        .cloned()
+        .fold(0.0f32, f32::max);
+    assert!(
+        bass_low_max > 0.20,
+        "Bass tone should activate lower bars (got {})",
+        bass_low_max
+    );
+    assert!(
+        bass_low_max > bass_high_max * 2.0,
+        "Bass tone should be concentrated in low bars (low: {}, high: {})",
+        bass_low_max,
+        bass_high_max
+    );
+
+    // Treble engine should have strong energy in high bars (20..31) and low energy in bass bars (0..8)
+    let treble_high_max = treble_engine.bars[20..32]
+        .iter()
+        .cloned()
+        .fold(0.0f32, f32::max);
+    let treble_low_max = treble_engine.bars[0..8]
+        .iter()
+        .cloned()
+        .fold(0.0f32, f32::max);
+    assert!(
+        treble_high_max > 0.20,
+        "Treble tone should activate high bars (got {})",
+        treble_high_max
+    );
+    assert!(
+        treble_high_max > treble_low_max * 2.0,
+        "Treble tone should be concentrated in high bars (high: {}, low: {})",
+        treble_high_max,
+        treble_low_max
+    );
+}
+
+#[test]
 fn test_visualizer_pipeline_shared_buffer_and_fft() {
     // Test that audio samples flow into the shared buffer through VisualizerSource
     // and produce active frequency bars in VisualizerEngine.

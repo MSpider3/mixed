@@ -18,7 +18,7 @@ impl VisualizerMode {
 }
 
 /// FFT-based audio visualizer engine.
-/// Ported from kew's visuals.c and crav's audio processing.
+/// Calibrated for dynamic beat response, wide dynamic range, and fluid ballistics.
 pub struct VisualizerEngine {
     /// Number of FFT bins.
     fft_size: usize,
@@ -28,6 +28,8 @@ pub struct VisualizerEngine {
     pub num_bars: usize,
     /// Blackman-Harris window coefficients.
     window: Vec<f32>,
+    /// Coherent gain scale factor to normalize FFT magnitudes to 0 dBFS.
+    window_scale: f32,
     /// Pre-planned FFT forward runner
     fft: Arc<dyn Fft<f32>>,
     /// Pre-allocated FFT complex buffer
@@ -41,6 +43,13 @@ pub struct VisualizerEngine {
 impl VisualizerEngine {
     pub fn new(fft_size: usize, num_bars: usize) -> Self {
         let window = blackman_harris(fft_size);
+        let window_sum: f32 = window.iter().sum();
+        let window_scale = if window_sum > 0.0 {
+            1.0 / (window_sum * 0.5)
+        } else {
+            1.0 / (fft_size as f32 * 0.25)
+        };
+
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(fft_size);
         Self {
@@ -48,6 +57,7 @@ impl VisualizerEngine {
             bars: vec![0.0; num_bars],
             num_bars,
             window,
+            window_scale,
             fft,
             fft_buffer: vec![Complex { re: 0.0, im: 0.0 }; fft_size],
             magnitudes: vec![0.0; fft_size / 2 + 1],
@@ -71,14 +81,14 @@ impl VisualizerEngine {
 
     /// Process raw audio samples into smoothed frequency bars.
     ///
-    /// Takes a mono/stereo sample slice of length >= `fft_size`.
-    /// Applies Blackman-Harris windowing, forward FFT, 1/3 octave grouping,
-    /// and asymmetric smoothing (fast attack, slow release).
+    /// Takes a sample slice of length >= `fft_size`.
+    /// Applies Blackman-Harris windowing, forward FFT, logarithmic frequency band mapping,
+    /// dynamic contrast expansion, and asymmetric attack/decay smoothing.
     pub fn process_samples(&mut self, samples: &[f32], sample_rate: u32) {
         if samples.len() < self.fft_size {
-            // Decay existing bars if not enough samples
+            // Smoothly decay existing bars if not enough samples
             for b in self.bars.iter_mut() {
-                *b = (*b - 0.05).max(0.0);
+                *b = (*b * 0.85 - 0.02).max(0.0);
             }
             return;
         }
@@ -96,15 +106,15 @@ impl VisualizerEngine {
         // Run FFT
         self.fft.process(&mut self.fft_buffer);
 
-        // Calculate magnitude spectrum (first N/2+1 bins)
+        // Calculate normalized magnitude spectrum (0.0..1.0 relative to full-scale 0 dBFS)
         let num_bins = self.fft_size / 2 + 1;
         for i in 0..num_bins {
             let re = self.fft_buffer[i].re;
             let im = self.fft_buffer[i].im;
-            self.magnitudes[i] = (re * re + im * im).sqrt();
+            self.magnitudes[i] = (re * re + im * im).sqrt() * self.window_scale;
         }
 
-        // Map FFT bins to display bars
+        // Map FFT bins to logarithmic display bars
         map_to_bars_inplace(
             &self.magnitudes,
             &mut self.new_bars,
@@ -112,14 +122,14 @@ impl VisualizerEngine {
             self.fft_size,
         );
 
-        // Apply asymmetric smoothing: fast rise, slow fall
+        // Apply asymmetric smoothing: fast attack (snappy beat response), smooth rhythmic fall
         for (current, &target) in self.bars.iter_mut().zip(self.new_bars.iter()) {
             if target > *current {
-                // Fast attack
-                *current = *current * 0.3 + target * 0.7;
+                // Fast attack: jumps to target quickly when drums/beats hit
+                *current = *current * 0.15 + target * 0.85;
             } else {
-                // Smooth decay
-                *current = *current * 0.85 + target * 0.15;
+                // Smooth rhythmic decay: fluid falloff
+                *current = *current * 0.75 + target * 0.25;
             }
             // Clamp to valid range
             *current = current.clamp(0.0, 1.0);
@@ -129,7 +139,7 @@ impl VisualizerEngine {
     /// Decay visualizer bars during pause/silence.
     pub fn decay(&mut self) {
         for b in self.bars.iter_mut() {
-            *b = (*b - 0.03).max(0.0);
+            *b = (*b * 0.85 - 0.02).max(0.0);
         }
     }
 
@@ -142,8 +152,11 @@ impl VisualizerEngine {
     }
 }
 
-/// Blackman-Harris window function (from kew's visuals.c).
+/// Blackman-Harris window function.
 fn blackman_harris(size: usize) -> Vec<f32> {
+    if size <= 1 {
+        return vec![1.0; size];
+    }
     let a0 = 0.35875;
     let a1 = 0.48829;
     let a2 = 0.14128;
@@ -156,8 +169,8 @@ fn blackman_harris(size: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Map FFT magnitude bins to display bars using logarithmic 1/3 octave bands,
-/// dB scale normalization, and pink noise EQ compensation.
+/// Map FFT magnitude bins to display bars using logarithmic musical frequency bands,
+/// dynamic decibel normalization, power-curve contrast, and equal-loudness compensation.
 fn map_to_bars_inplace(magnitudes: &[f32], bars: &mut [f32], sample_rate: u32, fft_size: usize) {
     let num_bars = bars.len();
     if magnitudes.is_empty() || num_bars == 0 || sample_rate == 0 {
@@ -169,47 +182,58 @@ fn map_to_bars_inplace(magnitudes: &[f32], bars: &mut [f32], sample_rate: u32, f
 
     let num_bins = fft_size / 2 + 1;
     let bin_spacing = sample_rate as f32 / fft_size as f32;
-    let nyquist = 0.5f32 * sample_rate as f32;
 
-    // Center frequencies for 1/3 octave bands
+    // Musical frequency range: 25 Hz (sub-bass) to 18 kHz (air/treble)
     let min_freq = 25.0f32;
-    let octave_fraction = 1.0f32 / 3.0f32;
-    let factor = 2.0f32.powf(octave_fraction);
+    let max_freq = (sample_rate as f32 * 0.45).min(18000.0).max(min_freq * 2.0);
+    let log_min = min_freq.ln();
+    let log_max = max_freq.ln();
 
     for (bar_idx, bar) in bars.iter_mut().enumerate() {
-        let center_freq = min_freq * factor.powi(bar_idx as i32);
-        if center_freq > nyquist {
-            *bar = 0.0;
-            continue;
-        }
+        let f_low = (log_min + (bar_idx as f32 / num_bars as f32) * (log_max - log_min)).exp();
+        let f_high =
+            (log_min + ((bar_idx + 1) as f32 / num_bars as f32) * (log_max - log_min)).exp();
 
-        let lower_freq = center_freq / 2.0f32.powf(octave_fraction / 2.0);
-        let upper_freq = center_freq * 2.0f32.powf(octave_fraction / 2.0);
+        let lower_bin = ((f_low / bin_spacing).floor() as usize).clamp(0, num_bins - 1);
+        let upper_bin = ((f_high / bin_spacing).ceil() as usize).clamp(lower_bin, num_bins - 1);
 
-        let lower_bin = ((lower_freq / bin_spacing).floor() as usize).min(num_bins - 1);
-        let upper_bin = ((upper_freq / bin_spacing).ceil() as usize).min(num_bins - 1);
-
-        let mut sum = 0.0f32;
-        let mut count = 0;
+        // Combine peak and RMS energy to capture both sharp transients (kicks/snares) and tonal body
+        let mut peak_mag = 0.0f32;
+        let mut energy_sum = 0.0f32;
+        let mut bin_count = 0;
         for &mag in &magnitudes[lower_bin..=upper_bin] {
-            sum += mag;
-            count += 1;
+            if mag > peak_mag {
+                peak_mag = mag;
+            }
+            energy_sum += mag * mag;
+            bin_count += 1;
         }
-
-        let avg = if count > 0 { sum / count as f32 } else { 0.0 };
-
-        // Convert magnitude to dB (dynamic range ~60dB)
-        let db = if avg > 1e-6 {
-            20.0 * avg.log10()
+        let rms_mag = if bin_count > 0 {
+            (energy_sum / bin_count as f32).sqrt()
         } else {
-            -60.0
+            0.0
         };
 
-        // Normalize -60dB..0dB to 0.0..1.0
-        let norm = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+        // 60% peak + 40% RMS for punchy beat reactivity
+        let combined_mag = peak_mag * 0.60 + rms_mag * 0.40;
 
-        // Pink noise EQ curve compensation (boost highs by ~3dB/octave)
-        let eq_boost = 1.0 + (bar_idx as f32 / num_bars as f32) * 0.6;
-        *bar = (norm * eq_boost).clamp(0.0, 1.0);
+        // Convert normalized magnitude to dB (dynamic range: -45 dBFS to 0 dBFS)
+        let db = if combined_mag > 1e-5 {
+            20.0 * combined_mag.log10()
+        } else {
+            -45.0
+        };
+
+        // Normalize -45 dB..0 dB to 0.0..1.0
+        let norm = ((db + 45.0) / 45.0).clamp(0.0, 1.0);
+
+        // Power curve / Gamma correction (x^1.35) expands dynamic contrast,
+        // making beats pop sharply against background noise
+        let contrast_norm = norm.powf(1.35);
+
+        // Equal-loudness / Pink noise compensation curve:
+        // Boost higher frequencies so hi-hats and vocals match the visual amplitude of bass kicks
+        let eq_boost = 1.0 + (bar_idx as f32 / num_bars as f32) * 0.75;
+        *bar = (contrast_norm * eq_boost).clamp(0.0, 1.0);
     }
 }
