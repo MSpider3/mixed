@@ -8,12 +8,12 @@ use ratatui::{
 
 use crate::data::lyrics::{LyricsData, WordTimestamp};
 
-const C_ACCENT: Color = Color::Magenta;
 const C_ACTIVE: Color = Color::LightMagenta;
+const C_INACTIVE: Color = Color::DarkGray;
 
 /// Render a constrained 3-line synced view of the lyrics:
 /// Line 1: Previous line (faded)
-/// Line 2: Active line (bright/highlighted)
+/// Line 2: Active line (bright/highlighted, clean un-distorted font)
 /// Line 3: Next line (faded)
 pub fn render_constrained_lyrics(
     f: &mut Frame,
@@ -33,13 +33,13 @@ pub fn render_constrained_lyrics(
         let prev_line = &lyrics.lines[active_idx - 1];
         display_lines.push(Line::from(Span::styled(
             prev_line.text.trim(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(C_INACTIVE),
         )));
     } else {
         display_lines.push(Line::from(""));
     }
 
-    // Active line (highlighted)
+    // Active line (highlighted with vibrant color; avoids synthetic bold distortion on Indic fonts)
     let active_line = &lyrics.lines[active_idx];
     if lyrics.has_word_timestamps() && active_idx < lyrics.word_timestamps.len() {
         let words = &lyrics.word_timestamps[active_idx];
@@ -53,10 +53,7 @@ pub fn render_constrained_lyrics(
                     "♪ ",
                     Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    active_line.text.trim(),
-                    Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(active_line.text.trim(), Style::default().fg(C_ACTIVE)),
             ]));
         }
     } else {
@@ -65,10 +62,7 @@ pub fn render_constrained_lyrics(
                 "♪ ",
                 Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                active_line.text.trim(),
-                Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(active_line.text.trim(), Style::default().fg(C_ACTIVE)),
         ]));
     }
 
@@ -77,7 +71,7 @@ pub fn render_constrained_lyrics(
         let next_line = &lyrics.lines[active_idx + 1];
         display_lines.push(Line::from(Span::styled(
             next_line.text.trim(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(C_INACTIVE),
         )));
     } else {
         display_lines.push(Line::from(""));
@@ -112,15 +106,12 @@ pub fn render_full_timed_lyrics(
                     "♪ ",
                     Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    lyric_line.text.trim(),
-                    Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(lyric_line.text.trim(), Style::default().fg(C_ACTIVE)),
             ]));
         } else {
             display_lines.push(Line::from(Span::styled(
                 lyric_line.text.trim(),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(C_INACTIVE),
             )));
         }
     }
@@ -129,7 +120,7 @@ pub fn render_full_timed_lyrics(
     f.render_widget(widget, area);
 }
 
-/// Render word-level highlighting for Enhanced LRC.
+/// Render word-level highlighting for Enhanced LRC without bold font distortion on Indic scripts.
 fn render_word_highlighted<'a>(words: &'a [WordTimestamp], active_word: usize) -> Vec<Span<'a>> {
     let mut spans = vec![Span::styled(
         "♪ ",
@@ -138,9 +129,9 @@ fn render_word_highlighted<'a>(words: &'a [WordTimestamp], active_word: usize) -
 
     for (i, word) in words.iter().enumerate() {
         let style = if i <= active_word {
-            Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD)
+            Style::default().fg(C_ACTIVE)
         } else {
-            Style::default().fg(C_ACCENT)
+            Style::default().fg(C_INACTIVE)
         };
         spans.push(Span::styled(&word.word, style));
     }

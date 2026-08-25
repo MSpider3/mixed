@@ -189,55 +189,37 @@ pub fn read_cover_art(path: &Path) -> Option<Vec<u8>> {
 
 /// Parses embedded timed lyrics (LRC format within tags).
 fn parse_embedded_timed(text: &str) -> LyricsKind {
-    let mut lines = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some((time, text)) = parse_lrc_line(line) {
-            lines.push(LrcLine {
-                time_secs: time,
-                text,
-            });
-        }
-    }
-
-    if lines.is_empty() {
-        LyricsKind::Untimed(text.lines().map(|l| l.to_string()).collect())
+    if let Some(data) = crate::data::lyrics::parse_lrc_content(text) {
+        LyricsKind::Timed(data.lines)
     } else {
-        lines.sort_by(|a, b| a.time_secs.partial_cmp(&b.time_secs).unwrap());
-        LyricsKind::Timed(lines)
+        LyricsKind::Untimed(text.lines().map(|l| l.to_string()).collect())
     }
 }
 
-/// Parses a single LRC line like "[01:23.45]Some lyrics text".
-fn parse_lrc_line(line: &str) -> Option<(f64, String)> {
-    if !line.starts_with('[') {
+/// Parses a timestamp string like "01:23.45", "01:23.45,450", or "01:23:45" into seconds.
+pub fn parse_timestamp(ts: &str) -> Option<f64> {
+    let ts = ts.trim();
+    if ts.is_empty() {
         return None;
     }
-    let end_bracket = line.find(']')?;
-    let timestamp = &line[1..end_bracket];
-    let text = line[end_bracket + 1..].trim().to_string();
+    // Handle timestamps with commas: "01:23.45,450" (time, duration) -> extract time
+    let ts_clean = if let Some(comma_pos) = ts.find(',') {
+        ts[..comma_pos].trim()
+    } else {
+        ts
+    };
 
-    let time = parse_timestamp(timestamp)?;
-    Some((time, text))
-}
-
-/// Parses a timestamp string like "01:23.45" or "01:23:45" into seconds.
-pub fn parse_timestamp(ts: &str) -> Option<f64> {
-    let parts: Vec<&str> = ts.split(':').collect();
+    let parts: Vec<&str> = ts_clean.split(':').collect();
     match parts.len() {
         2 => {
-            let mins: f64 = parts[0].parse().ok()?;
-            let secs: f64 = parts[1].parse().ok()?;
+            let mins: f64 = parts[0].trim().parse().ok()?;
+            let secs: f64 = parts[1].trim().parse().ok()?;
             Some(mins * 60.0 + secs)
         }
         3 => {
-            let hours: f64 = parts[0].parse().ok()?;
-            let mins: f64 = parts[1].parse().ok()?;
-            let secs: f64 = parts[2].parse().ok()?;
+            let hours: f64 = parts[0].trim().parse().ok()?;
+            let mins: f64 = parts[1].trim().parse().ok()?;
+            let secs: f64 = parts[2].trim().parse().ok()?;
             Some(hours * 3600.0 + mins * 60.0 + secs)
         }
         _ => None,

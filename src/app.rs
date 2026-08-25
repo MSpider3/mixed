@@ -477,12 +477,12 @@ impl App {
         self.now_playing_meta = self.playlist.current_entry().map(|e| e.metadata.clone());
     }
 
-    /// Load external .lrc lyrics for the current track.
+    /// Load external .lrc or embedded tag lyrics for the current track.
     fn load_lyrics_for_current(&mut self) {
-        self.current_lyrics = self
-            .playlist
-            .current_entry()
-            .and_then(|e| lyrics::load_lyrics_from_lrc(&e.path));
+        self.current_lyrics = self.playlist.current_entry().and_then(|e| {
+            lyrics::load_lyrics_from_lrc(&e.path)
+                .or_else(|| lyrics::load_lyrics_from_metadata(&e.path))
+        });
     }
 
     pub fn generate_cover_art_protocol(&mut self) {

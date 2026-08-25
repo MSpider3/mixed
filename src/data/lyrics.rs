@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::data::metadata::{parse_timestamp, LrcLine};
 
 /// Word-level timestamp for Enhanced LRC.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WordTimestamp {
     pub time_secs: f64,
     pub word: String,
@@ -61,7 +61,16 @@ pub fn load_lyrics_from_lrc(audio_path: &Path) -> Option<LyricsData> {
     parse_lrc_content(&content)
 }
 
-/// Parse LRC file content into structured lyrics data.
+/// Load embedded lyrics directly from track metadata/tags.
+pub fn load_lyrics_from_metadata(audio_path: &Path) -> Option<LyricsData> {
+    use lofty::{file::TaggedFileExt, probe::Probe, tag::ItemKey};
+    let tagged = Probe::open(audio_path).and_then(|p| p.read()).ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let lyrics_str = tag.get_string(&ItemKey::Lyrics)?;
+    parse_lrc_content(lyrics_str)
+}
+
+/// Parse LRC file content into structured lyrics data with full word-by-word timestamp support.
 pub fn parse_lrc_content(content: &str) -> Option<LyricsData> {
     let mut lines: Vec<LrcLine> = Vec::new();
     let mut word_timestamps: Vec<Vec<WordTimestamp>> = Vec::new();
@@ -72,91 +81,55 @@ pub fn parse_lrc_content(content: &str) -> Option<LyricsData> {
             continue;
         }
 
-        // Skip metadata tags like [ar:Artist], [ti:Title], etc.
-        if raw_line.starts_with("[ar:")
-            || raw_line.starts_with("[ti:")
-            || raw_line.starts_with("[al:")
-            || raw_line.starts_with("[by:")
-            || raw_line.starts_with("[offset:")
-            || raw_line.starts_with("[re:")
-            || raw_line.starts_with("[ve:")
-            || raw_line.starts_with("[length:")
+        // Skip metadata tags like [ar:Artist], [ti:Title], [length:03:45], etc.
+        let lower = raw_line.to_lowercase();
+        if lower.starts_with("[ar:")
+            || lower.starts_with("[ti:")
+            || lower.starts_with("[al:")
+            || lower.starts_with("[by:")
+            || lower.starts_with("[offset:")
+            || lower.starts_with("[re:")
+            || lower.starts_with("[ve:")
+            || lower.starts_with("[length:")
+            || lower.starts_with("[id:")
+            || lower.starts_with("[la:")
         {
             continue;
         }
 
-        // Parse line-level timestamp
+        // Parse leading line-level timestamp(s) in brackets: [mm:ss.xx]
         if !raw_line.starts_with('[') {
             continue;
         }
-        let end_bracket = match raw_line.find(']') {
-            Some(i) => i,
-            None => continue,
-        };
 
-        let ts_str = &raw_line[1..end_bracket];
-        let time = match parse_timestamp(ts_str) {
-            Some(t) => t,
-            None => continue,
-        };
+        let mut timestamps = Vec::new();
+        let mut rem = raw_line;
 
-        // Collect additional timestamps on the same line: [ts1][ts2][ts3]Text
-        let mut timestamps = vec![time];
-        let mut remainder = raw_line[end_bracket + 1..].trim_start();
-        while remainder.starts_with('[') {
-            if let Some(end) = remainder.find(']') {
-                let extra_ts = &remainder[1..end];
-                if let Some(extra_time) = parse_timestamp(extra_ts) {
-                    timestamps.push(extra_time);
-                    remainder = remainder[end + 1..].trim_start();
+        while rem.starts_with('[') {
+            if let Some(close_bracket) = rem.find(']') {
+                let tag = rem[1..close_bracket].trim();
+                if let Some(ts) = parse_timestamp(tag) {
+                    timestamps.push(ts);
+                    rem = rem[close_bracket + 1..].trim_start();
                 } else {
-                    break; // Not a timestamp bracket — it's part of the lyric text
+                    break;
                 }
             } else {
                 break;
             }
         }
-        let text_part = remainder;
 
-        // Parse Enhanced LRC word-level timestamps: <mm:ss.xx>word
-        let mut words = Vec::new();
-        if text_part.contains('<') && text_part.contains('>') {
-            let mut rem = text_part;
-            while let Some(start) = rem.find('<') {
-                if let Some(end) = rem[start..].find('>') {
-                    let word_ts_str = &rem[start + 1..start + end];
-                    if let Some(word_time) = parse_timestamp(word_ts_str) {
-                        rem = &rem[start + end + 1..];
-                        let word_end = rem.find('<').unwrap_or(rem.len());
-                        let word = rem[..word_end].to_string();
-                        rem = &rem[word_end..];
-                        if !word.is_empty() {
-                            words.push(WordTimestamp {
-                                time_secs: word_time,
-                                word,
-                            });
-                        }
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
+        if timestamps.is_empty() {
+            continue;
         }
 
-        // Clean text (strip inline Enhanced LRC tags for display)
-        let clean_text = if !words.is_empty() {
-            words
-                .iter()
-                .map(|w| w.word.as_str())
-                .collect::<Vec<_>>()
-                .join("")
-        } else {
-            text_part.to_string()
-        };
+        let default_time = timestamps[0];
+        let (clean_text, words) = parse_line_tokens(rem, default_time);
 
-        // Emit one entry per timestamp (multi-timestamp lines share the same text/words)
+        if clean_text.is_empty() && words.is_empty() {
+            continue;
+        }
+
         for ts in timestamps {
             lines.push(LrcLine {
                 time_secs: ts,
@@ -170,9 +143,13 @@ pub fn parse_lrc_content(content: &str) -> Option<LyricsData> {
         return None;
     }
 
-    // Ensure sorted by time
+    // Ensure sorted chronologically by time
     let mut combined: Vec<_> = lines.into_iter().zip(word_timestamps).collect();
-    combined.sort_by(|a, b| a.0.time_secs.partial_cmp(&b.0.time_secs).unwrap());
+    combined.sort_by(|a, b| {
+        a.0.time_secs
+            .partial_cmp(&b.0.time_secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let (sorted_lines, sorted_words): (Vec<_>, Vec<_>) = combined.into_iter().unzip();
 
@@ -181,4 +158,174 @@ pub fn parse_lrc_content(content: &str) -> Option<LyricsData> {
         lines: sorted_lines,
         word_timestamps: sorted_words,
     })
+}
+
+/// Tokenizes a line body to extract word-level timestamps and strip raw timestamp tags.
+/// Supports `<mm:ss.xx>`, `[mm:ss.xx]`, `(mm:ss.xx,duration)`, and `{\k...}` karaoke tags.
+pub fn parse_line_tokens(line_body: &str, line_start_time: f64) -> (String, Vec<WordTimestamp>) {
+    let mut words: Vec<WordTimestamp> = Vec::new();
+    let mut clean_text = String::with_capacity(line_body.len());
+    let mut current_word_text = String::new();
+    let mut current_time = line_start_time;
+    let mut has_explicit_word_ts = false;
+
+    let chars: Vec<char> = line_body.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        let ch = chars[i];
+
+        // Check for timestamp or karaoke tags enclosed in <...>, [...], (...), or {\...}
+        if ch == '<' || ch == '[' || ch == '(' || (ch == '{' && i + 1 < len && chars[i + 1] == '\\')
+        {
+            let closing_char = match ch {
+                '<' => '>',
+                '[' => ']',
+                '(' => ')',
+                '{' => '}',
+                _ => ' ',
+            };
+
+            let mut j = i + 1;
+            while j < len && chars[j] != closing_char {
+                j += 1;
+            }
+
+            if j < len {
+                let tag_content: String = chars[i + 1..j].iter().collect();
+                let trimmed_tag = tag_content.trim();
+
+                if let Some(ts) = parse_timestamp(trimmed_tag) {
+                    has_explicit_word_ts = true;
+                    // If we accumulated word text prior to this timestamp, flush it with current_time
+                    if !current_word_text.is_empty() {
+                        words.push(WordTimestamp {
+                            time_secs: current_time,
+                            word: current_word_text.clone(),
+                        });
+                        current_word_text.clear();
+                    }
+                    current_time = ts;
+                    i = j + 1;
+                    continue;
+                } else if trimmed_tag.starts_with("\\k")
+                    || trimmed_tag.starts_with("\\K")
+                    || trimmed_tag.starts_with("\\kf")
+                    || trimmed_tag.starts_with("\\ko")
+                {
+                    // Karaoke syllable timing tag: strip tag from clean_text
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+
+        current_word_text.push(ch);
+        clean_text.push(ch);
+        i += 1;
+    }
+
+    // Flush trailing word
+    if !current_word_text.is_empty() && has_explicit_word_ts {
+        words.push(WordTimestamp {
+            time_secs: current_time,
+            word: current_word_text,
+        });
+    }
+
+    if !has_explicit_word_ts {
+        words.clear();
+    }
+
+    let clean = clean_text.trim().to_string();
+    (clean, words)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_enhanced_lrc_standard() {
+        let lrc = r#"
+[ti:Tum Hi Ho]
+[ar:Arijit Singh]
+[00:10.00]<00:10.00>Hum <00:10.50>tere <00:11.00>bin <00:11.80>ab <00:12.20>reh <00:12.60>nahi <00:13.00>sakte
+[00:15.00]<00:15.00>Tere <00:15.50>bina <00:16.00>kya <00:16.50>wajood <00:17.00>mera
+"#;
+        let data = parse_lrc_content(lrc).expect("Should parse LRC");
+        assert_eq!(data.lines.len(), 2);
+        assert_eq!(data.lines[0].time_secs, 10.0);
+        assert_eq!(data.lines[0].text, "Hum tere bin ab reh nahi sakte");
+        assert_eq!(data.lines[1].time_secs, 15.0);
+        assert_eq!(data.lines[1].text, "Tere bina kya wajood mera");
+
+        assert!(data.has_word_timestamps());
+        assert_eq!(data.word_timestamps[0].len(), 7);
+        assert_eq!(data.word_timestamps[0][0].word.trim(), "Hum");
+        assert_eq!(data.word_timestamps[0][0].time_secs, 10.0);
+        assert_eq!(data.word_timestamps[0][1].word.trim(), "tere");
+        assert_eq!(data.word_timestamps[0][1].time_secs, 10.5);
+
+        // Test active line & active word queries
+        assert_eq!(data.find_active_line(9.5), 0);
+        assert_eq!(data.find_active_line(10.2), 0);
+        assert_eq!(data.find_active_line(15.2), 1);
+
+        assert_eq!(data.find_active_word(0, 10.0), 0); // "Hum"
+        assert_eq!(data.find_active_word(0, 10.6), 1); // "tere"
+        assert_eq!(data.find_active_word(0, 11.2), 2); // "bin"
+        assert_eq!(data.find_active_word(0, 13.5), 6); // "sakte"
+    }
+
+    #[test]
+    fn test_parse_hindi_devanagari_word_by_word() {
+        let lrc = r#"
+[00:20.00]<00:20.00>क्योंकि <00:20.60>तुम <00:21.00>ही <00:21.50>हो <00:22.00>अब <00:22.50>तुम <00:23.00>ही <00:23.50>हो
+[00:25.00]<00:25.00>जिंदगी <00:25.80>अब <00:26.30>तुम <00:26.80>ही <00:27.40>हो
+"#;
+        let data = parse_lrc_content(lrc).expect("Should parse Hindi LRC");
+        assert_eq!(data.lines.len(), 2);
+        assert_eq!(data.lines[0].text, "क्योंकि तुम ही हो अब तुम ही हो");
+        assert_eq!(data.lines[1].text, "जिंदगी अब तुम ही हो");
+        assert_eq!(data.word_timestamps[0].len(), 8);
+        assert_eq!(data.word_timestamps[0][0].word.trim(), "क्योंकि");
+        assert_eq!(data.word_timestamps[0][1].word.trim(), "तुम");
+    }
+
+    #[test]
+    fn test_parse_inline_bracket_word_timestamps() {
+        let lrc = r#"
+[00:05.00][00:05.00]First [00:05.50]second [00:06.00]third
+"#;
+        let data = parse_lrc_content(lrc).expect("Should parse inline bracket timestamps");
+        assert_eq!(data.lines[0].text, "First second third");
+        assert_eq!(data.word_timestamps[0].len(), 3);
+        assert_eq!(data.word_timestamps[0][0].word.trim(), "First");
+        assert_eq!(data.word_timestamps[0][1].word.trim(), "second");
+        assert_eq!(data.word_timestamps[0][2].word.trim(), "third");
+    }
+
+    #[test]
+    fn test_parse_qrc_and_karaoke_tags() {
+        let lrc = r#"
+[00:08.00]Hello(00:08.00,400) world(00:08.40,600)
+[00:12.00]{\k50}Karaoke {\k80}style {\k100}line
+"#;
+        let data = parse_lrc_content(lrc).expect("Should parse QRC and karaoke LRC");
+        assert_eq!(data.lines[0].text, "Hello world");
+        assert_eq!(data.word_timestamps[0].len(), 2);
+        assert_eq!(data.lines[1].text, "Karaoke style line");
+    }
+
+    #[test]
+    fn test_plain_lines_with_bracket_text_preserved() {
+        let lrc = r#"
+[00:01.00]Simple line (Guitar Solo) [Chorus]
+"#;
+        let data = parse_lrc_content(lrc).expect("Should parse plain line");
+        assert_eq!(data.lines[0].text, "Simple line (Guitar Solo) [Chorus]");
+        assert!(!data.has_word_timestamps());
+    }
 }

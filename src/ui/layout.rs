@@ -283,6 +283,10 @@ fn draw_metadata(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    f.render_widget(ratatui::widgets::Clear, area);
     if let Some(entry) = app.playlist.current_entry() {
         if app.show_full_lyrics {
             if let Some(ref lyrics_data) = app.current_lyrics {
@@ -366,6 +370,10 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_visualizer(f: &mut Frame, app: &mut App, area: Rect) {
+    if area.height < 2 || area.width == 0 {
+        return;
+    }
+    f.render_widget(ratatui::widgets::Clear, area);
     // try_read() is non-blocking: if the FFT thread currently holds the write
     // lock, we skip this frame rather than stalling the render loop (and
     // indirectly blocking the audio decode path via mutex back-pressure).

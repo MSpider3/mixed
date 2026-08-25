@@ -5,6 +5,20 @@ All notable changes to the **mixed** music player will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-08-26
+
+### Fixed
+- **Hindi & Indic Script Font Readability**:
+  - Resolved font distortion on Hindi (Devanagari) and other Indic scripts (Bengali, Tamil, Telugu, Gujarati, etc.) caused by synthetic bolding in terminal font shapers. Active lyric lines now render cleanly without ligature/matra corruption.
+- **Visualizer Bleeding Prevention**:
+  - Added explicit buffer clearing (`Clear` widget) to both lyrics and visualizer render regions, preventing visualizer characters from bleeding or ghosting into lyrics during window resize or track changes.
+- **Word-by-Word Lyrics & Enhanced LRC Timestamp Stripping**:
+  - Fixed an issue where word-by-word synced lyrics displayed raw inline timestamps (e.g., `<00:12.34>`, `[00:12.80]`, `(00:12.34,400)`, `{\k50}`).
+  - Built an advanced LRC tokenizer supporting `<mm:ss.xx>`, `[mm:ss.xx]`, QRC `(mm:ss.xx,dur)`, and karaoke tags for both external `.lrc` files and embedded metadata tags.
+  - Implemented smooth word-by-word highlighting during playback.
+
+---
+
 ## [1.4.1] - 2026-08-24
 
 ### Fixed
