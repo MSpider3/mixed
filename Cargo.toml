@@ -1,6 +1,6 @@
 [package]
 name = "mixed"
-version = "1.4.2"
+version = "1.4.3"
 edition = "2021"
 description = "A next-generation terminal music player written in Rust"
 license = "GPL-3.0"

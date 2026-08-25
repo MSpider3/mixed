@@ -153,7 +153,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_vis_mode = current_vis_mode;
         }
 
-        if force_clear {
+        if force_clear || app.force_terminal_clear {
+            app.force_terminal_clear = false;
             terminal.clear()?;
             app.refresh_needed = true;
         }
@@ -226,10 +227,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // Visualizer wake-up: the FFT thread fires this after each spectrum frame
             // (~34 ms). When music is playing this gives the UI ~30 fps for smooth bars;
-            // when paused the FFT thread decays to silence and sends less often, so
-            // the main loop gracefully idles at near-zero CPU.
+            // when in Full Lyrics Mode or other views, skip visualizer redraws to avoid
+            // terminal cursor desync and high CPU.
             recv(vis_wake_rx) -> _ => {
-                app.refresh_needed = true;
+                if app.active_panel == mixed::app::ActivePanel::NowPlaying && !app.show_full_lyrics {
+                    app.refresh_needed = true;
+                }
             }
             recv(lib_rx) -> res => {
                 app.library_rx = None;

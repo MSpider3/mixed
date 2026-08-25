@@ -255,9 +255,17 @@ pub fn parse_line_tokens(line_body: &str, line_start_time: f64) -> (String, Vec<
 
     if !has_explicit_word_ts {
         words.clear();
+    } else {
+        for w in &mut words {
+            w.word = w.word.replace("\\\"", "\"").replace("\\'", "'");
+        }
     }
 
-    let clean = clean_text.trim().to_string();
+    let clean = clean_text
+        .replace("\\\"", "\"")
+        .replace("\\'", "'")
+        .trim()
+        .to_string();
     (clean, words)
 }
 

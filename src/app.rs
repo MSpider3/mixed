@@ -102,6 +102,10 @@ pub struct App {
     /// refresh_needed = true, giving ~30 fps to the visualizer without tying
     /// the main tick to a 34 ms sleep.
     pub vis_wake_tx: Option<crossbeam_channel::Sender<()>>,
+    /// Trigger an explicit terminal clear on seek or lyric line change to prevent CTL cursor desync.
+    pub force_terminal_clear: bool,
+    /// Last active lyric line index (tracked for clean repaint on line transition).
+    pub last_lyric_line: Option<usize>,
 }
 
 impl App {
@@ -172,6 +176,8 @@ impl App {
             current_cover_protocol: None,
             last_cover_tmp_path: None,
             vis_wake_tx: Some(vis_wake_tx),
+            force_terminal_clear: false,
+            last_lyric_line: None,
         };
 
         // Load library: use cache for instant display, rescan in background for freshness
@@ -543,6 +549,8 @@ impl App {
         self.stopped = false;
         self.pending_seek = None;
         self.last_seek_input = None;
+        self.last_lyric_line = None;
+        self.force_terminal_clear = true;
         if let Some(entry) = self.playlist.current_entry() {
             let path = entry.path.clone();
             let load_res = self.player.as_mut().map(|player| player.load_track(&path));
@@ -658,6 +666,7 @@ impl App {
             state.seek_target.store(pos_us, Ordering::Relaxed);
         }
         self.trigger_mpris_update();
+        self.force_terminal_clear = true;
         self.refresh_needed = true;
     }
 
@@ -788,6 +797,20 @@ impl App {
         } else if let Ok(bars) = self.visualizer_bars.try_read() {
             if bars.iter().any(|&b| b > 0.001) {
                 self.refresh_needed = true;
+            }
+        }
+
+        // Track lyric line transition for clean repaint without cursor drift
+        let active_lyric = self
+            .current_lyrics
+            .as_ref()
+            .map(|l| l.find_active_line(self.display_elapsed_secs()));
+
+        if active_lyric != self.last_lyric_line {
+            self.last_lyric_line = active_lyric;
+            self.refresh_needed = true;
+            if self.show_full_lyrics {
+                self.force_terminal_clear = true;
             }
         }
 

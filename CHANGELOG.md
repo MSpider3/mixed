@@ -5,6 +5,17 @@ All notable changes to the **mixed** music player will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] - 2026-08-26
+
+### Fixed
+- **Indic / Hindi Character Duplication & Seeking Distortion**:
+  - Resolved character duplication (e.g. `दिदिल`, `पपस`, `रहतीती`, `साँसाँस`) caused by 30 FPS terminal cursor desynchronization when rendering complex combining marks and matras.
+  - Implemented automatic full-canvas clearing (`force_terminal_clear`) upon seeking, forwarding, rewinding, or active lyric line transitions to ensure a clean repaint.
+  - Throttled visualizer redraws in Full Lyrics Mode to eliminate rapid partial diff artifacts while maintaining responsive 250ms lyric updates.
+  - Sanitized escaped quotes and backslashes in LRC files.
+
+---
+
 ## [1.4.2] - 2026-08-26
 
 ### Fixed
