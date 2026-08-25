@@ -117,9 +117,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut resize_pending = false;
     let mut last_resize_time = Instant::now();
 
-    // Track state to trigger terminal clears (prevent Sixel ghosting)
+    // Track state to trigger terminal clears (prevent Sixel / visualizer / view ghosting)
     let mut last_panel = app.active_panel;
     let mut last_track_path = app.playlist.current_entry().map(|e| e.path.clone());
+    let mut last_show_full_lyrics = app.show_full_lyrics;
+    let mut last_vis_mode = app.visualizer_mode;
 
     let never_rx = crossbeam_channel::never::<Vec<LibraryEntry>>();
     let never_player_rx = crossbeam_channel::never::<mixed::audio::player::Player>();
@@ -127,9 +129,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // After player init it stays live — the FFT thread keeps sending.
 
     while running.load(std::sync::atomic::Ordering::Relaxed) {
-        // Clear terminal to wipe old Sixel graphic layers if panel or track changed
+        // Clear terminal to wipe old Sixel graphic layers and visualizer bars if view state changed
         let current_panel = app.active_panel;
         let current_track_path = app.playlist.current_entry().map(|e| &e.path);
+        let current_show_full_lyrics = app.show_full_lyrics;
+        let current_vis_mode = app.visualizer_mode;
         let mut force_clear = false;
 
         if current_panel != last_panel {
@@ -139,6 +143,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if current_track_path != last_track_path.as_ref() {
             force_clear = true;
             last_track_path = current_track_path.cloned();
+        }
+        if current_show_full_lyrics != last_show_full_lyrics {
+            force_clear = true;
+            last_show_full_lyrics = current_show_full_lyrics;
+        }
+        if current_vis_mode != last_vis_mode {
+            force_clear = true;
+            last_vis_mode = current_vis_mode;
         }
 
         if force_clear {

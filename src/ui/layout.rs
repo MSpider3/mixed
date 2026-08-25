@@ -745,10 +745,17 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
 // ─── Help View ─────────────────────────────────────────────────────────────
 fn draw_help(f: &mut Frame, area: Rect) {
     let help_text = vec![
-        Line::from(Span::styled(
-            "  Keyboard Shortcuts",
-            Style::default().fg(C_ACCENT2).add_modifier(Modifier::BOLD),
-        )),
+        Line::from(vec![
+            Span::styled(
+                "  mixed ",
+                Style::default().fg(C_ACCENT2).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  —  Keyboard Shortcuts & Help", Style::default().fg(C_DIM)),
+        ]),
         Line::from(""),
         // Navigation & Views
         Line::from(Span::styled(

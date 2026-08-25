@@ -1279,6 +1279,7 @@ dependencies = [
  "serde_json",
  "symphonia",
  "tokio",
+ "unicode-width 0.2.0",
  "walkdir",
  "zbus",
 ]

@@ -162,12 +162,15 @@ pub fn parse_lrc_content(content: &str) -> Option<LyricsData> {
 
 /// Tokenizes a line body to extract word-level timestamps and strip raw timestamp tags.
 /// Supports `<mm:ss.xx>`, `[mm:ss.xx]`, `(mm:ss.xx,duration)`, and `{\k...}` karaoke tags.
+/// Protects Indic scripts (Devanagari, etc.) by binding timestamps to complete words.
 pub fn parse_line_tokens(line_body: &str, line_start_time: f64) -> (String, Vec<WordTimestamp>) {
     let mut words: Vec<WordTimestamp> = Vec::new();
     let mut clean_text = String::with_capacity(line_body.len());
-    let mut current_word_text = String::new();
-    let mut current_time = line_start_time;
     let mut has_explicit_word_ts = false;
+
+    let mut current_word = String::new();
+    let mut current_word_time: Option<f64> = None;
+    let mut pending_time: Option<f64> = None;
 
     let chars: Vec<char> = line_body.chars().collect();
     let len = chars.len();
@@ -198,15 +201,11 @@ pub fn parse_line_tokens(line_body: &str, line_start_time: f64) -> (String, Vec<
 
                 if let Some(ts) = parse_timestamp(trimmed_tag) {
                     has_explicit_word_ts = true;
-                    // If we accumulated word text prior to this timestamp, flush it with current_time
-                    if !current_word_text.is_empty() {
-                        words.push(WordTimestamp {
-                            time_secs: current_time,
-                            word: current_word_text.clone(),
-                        });
-                        current_word_text.clear();
+                    if current_word_time.is_none() {
+                        current_word_time = Some(ts);
+                    } else {
+                        pending_time = Some(ts);
                     }
-                    current_time = ts;
                     i = j + 1;
                     continue;
                 } else if trimmed_tag.starts_with("\\k")
@@ -221,16 +220,36 @@ pub fn parse_line_tokens(line_body: &str, line_start_time: f64) -> (String, Vec<
             }
         }
 
-        current_word_text.push(ch);
-        clean_text.push(ch);
+        if ch.is_whitespace() {
+            current_word.push(ch);
+            clean_text.push(ch);
+            let w_time = current_word_time
+                .or(pending_time)
+                .unwrap_or(line_start_time);
+            if !current_word.trim().is_empty() {
+                words.push(WordTimestamp {
+                    time_secs: w_time,
+                    word: current_word.clone(),
+                });
+            }
+            current_word.clear();
+            current_word_time = pending_time.take();
+        } else {
+            current_word.push(ch);
+            clean_text.push(ch);
+        }
+
         i += 1;
     }
 
     // Flush trailing word
-    if !current_word_text.is_empty() && has_explicit_word_ts {
+    if !current_word.trim().is_empty() {
+        let w_time = current_word_time
+            .or(pending_time)
+            .unwrap_or(line_start_time);
         words.push(WordTimestamp {
-            time_secs: current_time,
-            word: current_word_text,
+            time_secs: w_time,
+            word: current_word,
         });
     }
 
@@ -295,6 +314,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_hindi_syllable_level_does_not_break_words() {
+        let lrc = r#"
+[00:10.00]<00:10.00>दि<00:10.25>ल <00:10.50>का <00:11.00>द<00:11.25>रि<00:11.40>या <00:11.50>ब<00:11.75>ह <00:12.00>ही <00:12.50>ग<00:12.75>या
+"#;
+        let data = parse_lrc_content(lrc).expect("Should parse syllable Hindi LRC");
+        assert_eq!(data.lines[0].text, "दिल का दरिया बह ही गया");
+        assert_eq!(data.word_timestamps[0].len(), 6);
+        assert_eq!(data.word_timestamps[0][0].word.trim(), "दिल");
+        assert_eq!(data.word_timestamps[0][1].word.trim(), "का");
+        assert_eq!(data.word_timestamps[0][2].word.trim(), "दरिया");
+        assert_eq!(data.word_timestamps[0][3].word.trim(), "बह");
+        assert_eq!(data.word_timestamps[0][4].word.trim(), "ही");
+        assert_eq!(data.word_timestamps[0][5].word.trim(), "गया");
+    }
+
+    #[test]
     fn test_parse_inline_bracket_word_timestamps() {
         let lrc = r#"
 [00:05.00][00:05.00]First [00:05.50]second [00:06.00]third
@@ -316,6 +351,10 @@ mod tests {
         let data = parse_lrc_content(lrc).expect("Should parse QRC and karaoke LRC");
         assert_eq!(data.lines[0].text, "Hello world");
         assert_eq!(data.word_timestamps[0].len(), 2);
+        assert_eq!(data.word_timestamps[0][0].word.trim(), "Hello");
+        assert_eq!(data.word_timestamps[0][0].time_secs, 8.0);
+        assert_eq!(data.word_timestamps[0][1].word.trim(), "world");
+        assert_eq!(data.word_timestamps[0][1].time_secs, 8.4);
         assert_eq!(data.lines[1].text, "Karaoke style line");
     }
 
