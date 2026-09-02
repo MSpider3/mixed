@@ -1,6 +1,6 @@
-/// Desktop notifications for mixed.
-///
-/// Sends native desktop notifications on track changes via D-Bus (`org.freedesktop.Notifications`).
+//! Desktop notifications for mixed.
+//!
+//! Sends native desktop notifications on track changes via D-Bus (`org.freedesktop.Notifications`).
 
 #[cfg(target_os = "linux")]
 pub fn show_notification(title: &str, artist: &str, album: &str) {

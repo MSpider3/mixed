@@ -294,13 +294,13 @@ fn draw_metadata(f: &mut Frame, app: &mut App, area: Rect) {
     if let Some(entry) = app.playlist.current_entry() {
         let meta = &entry.metadata;
         let title_str = meta.display_title(app.config.strip_track_numbers);
-        let title_len = unicode_width::UnicodeWidthStr::width(&title_str[..]) as u16;
+        let title_len = unicode_width::UnicodeWidthStr::width(title_str) as u16;
         let title_w = title_len.min(area.width);
         let title_x = area.x + area.width.saturating_sub(title_w) / 2;
         app.ui_bounds.title_rect = Some(Rect::new(title_x, area.y, title_w, 1));
 
         let artist_str = meta.display_artist();
-        let artist_len = unicode_width::UnicodeWidthStr::width(&artist_str[..]) as u16;
+        let artist_len = unicode_width::UnicodeWidthStr::width(artist_str) as u16;
         let artist_w = artist_len.min(area.width);
         let artist_x = area.x + area.width.saturating_sub(artist_w) / 2;
         app.ui_bounds.artist_rect = Some(Rect::new(artist_x, area.y + 1, artist_w, 1));

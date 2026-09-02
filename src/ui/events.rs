@@ -449,11 +449,7 @@ pub fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
                 {
                     let rel_x = x - footer_rect.x;
                     let tab_width = footer_rect.width / 5;
-                    let selected_tab = if tab_width > 0 {
-                        (rel_x / tab_width).min(4)
-                    } else {
-                        0
-                    };
+                    let selected_tab = rel_x.checked_div(tab_width).unwrap_or(0).min(4);
 
                     let prev_panel = app.active_panel;
                     match selected_tab {
@@ -612,24 +608,22 @@ pub fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
                                 }
                             }
                         }
-                        ActivePanel::Search => {
-                            if clicked_row >= 2 {
-                                let list_row = clicked_row - 2;
-                                let results_height = panel_rect.height.saturating_sub(2) as usize;
-                                let scroll =
-                                    if results_height > 0 && app.search_cursor >= results_height {
-                                        app.search_cursor - results_height + 1
-                                    } else {
-                                        0
-                                    }
-                                    .min(app.search_results.len().saturating_sub(1));
-                                let target_idx = scroll + list_row;
-                                if target_idx < app.search_results.len() {
-                                    if app.search_cursor == target_idx {
-                                        handle_enter(app);
-                                    } else {
-                                        app.search_cursor = target_idx;
-                                    }
+                        ActivePanel::Search if clicked_row >= 2 => {
+                            let list_row = clicked_row - 2;
+                            let results_height = panel_rect.height.saturating_sub(2) as usize;
+                            let scroll =
+                                if results_height > 0 && app.search_cursor >= results_height {
+                                    app.search_cursor - results_height + 1
+                                } else {
+                                    0
+                                }
+                                .min(app.search_results.len().saturating_sub(1));
+                            let target_idx = scroll + list_row;
+                            if target_idx < app.search_results.len() {
+                                if app.search_cursor == target_idx {
+                                    handle_enter(app);
+                                } else {
+                                    app.search_cursor = target_idx;
                                 }
                             }
                         }

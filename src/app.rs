@@ -606,9 +606,7 @@ impl App {
                                 let title = meta.display_title(self.config.strip_track_numbers);
                                 let artist = meta.display_artist();
                                 let album = meta.display_album();
-                                crate::sys::notifications::show_notification(
-                                    &title, &artist, &album,
-                                );
+                                crate::sys::notifications::show_notification(title, artist, album);
                             }
                         }
 
