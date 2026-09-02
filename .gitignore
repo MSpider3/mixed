@@ -11,3 +11,6 @@
 # Log files
 *.log
 stderr.log
+
+# Personal developer test files and scripts
+personal_tests/

@@ -25,3 +25,5 @@ pub enum MediaCommand {
 /// Linux: Full MPRIS2 D-Bus service (playerctl, GNOME media controls, etc.)
 #[cfg(target_os = "linux")]
 pub mod mpris;
+
+pub mod notifications;

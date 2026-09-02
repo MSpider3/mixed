@@ -31,16 +31,23 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         return false;
     }
 
-    // If the user presses F2-F6 or Tab/BackTab, turn off search immediately
+    // If the user presses F2-F6 or Tab/BackTab, turn off search immediately and clean search query
     match key.code {
         KeyCode::F(2)
         | KeyCode::F(3)
         | KeyCode::F(4)
-        | KeyCode::F(5)
         | KeyCode::F(6)
         | KeyCode::Tab
         | KeyCode::BackTab => {
-            app.searching = false;
+            if app.searching || app.active_panel == ActivePanel::Search {
+                app.searching = false;
+                app.search_query.clear();
+            }
+        }
+        KeyCode::F(5) => {
+            app.active_panel = ActivePanel::Search;
+            app.searching = true;
+            app.search_query.clear();
         }
         _ => {}
     }
@@ -136,6 +143,7 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             app.cycle_repeat();
         }
         KeyCode::Char('v') => app.toggle_visualizer(),
+        KeyCode::Char('b') | KeyCode::Char('B') => app.search_artist_web(),
         KeyCode::Char('m') => {
             if app.active_panel == ActivePanel::NowPlaying {
                 app.show_full_lyrics = !app.show_full_lyrics;
@@ -235,7 +243,9 @@ fn handle_search_input(app: &mut App, key: event::KeyEvent) -> bool {
             }
         }
         KeyCode::Down => {
-            app.search_cursor += 1;
+            if !app.search_results.is_empty() && app.search_cursor + 1 < app.search_results.len() {
+                app.search_cursor += 1;
+            }
         }
         KeyCode::Char(c) => {
             app.search_query.push(c);
@@ -303,7 +313,9 @@ fn scroll_down(app: &mut App) {
             }
         }
         ActivePanel::Search => {
-            app.search_cursor += 1;
+            if !app.search_results.is_empty() && app.search_cursor + 1 < app.search_results.len() {
+                app.search_cursor += 1;
+            }
         }
         ActivePanel::NowPlaying if app.show_full_lyrics => {
             app.lyrics_scroll += 1;
@@ -355,6 +367,10 @@ fn handle_delete(app: &mut App) {
     if app.active_panel == ActivePanel::Queue && app.queue_cursor < app.playlist.len() {
         let is_current = Some(app.queue_cursor) == app.playlist.current_real_index();
         app.playlist.remove(app.queue_cursor);
+        if app.playlist.is_empty() {
+            app.clear_playlist();
+            return;
+        }
         if app.queue_cursor >= app.playlist.len() && app.queue_cursor > 0 {
             app.queue_cursor -= 1;
         }
@@ -367,12 +383,261 @@ fn handle_delete(app: &mut App) {
 
 /// Handle mouse events.
 pub fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
+    let x = mouse.column;
+    let y = mouse.row;
+
     match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            let _x = mouse.column;
-            let _y = mouse.row;
-            // Mouse click handling for progress bar, tabs, etc.
-            // Will be implemented with area tracking
+        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
+            // 1. Scrollbar click & drag (Queue / Library / Search)
+            if let Some(sb_rect) = app.ui_bounds.scrollbar_rect {
+                if x >= sb_rect.x
+                    && x < sb_rect.x + sb_rect.width
+                    && y >= sb_rect.y
+                    && y < sb_rect.y + sb_rect.height
+                {
+                    let rel_y = (y - sb_rect.y) as f64;
+                    let ratio = (rel_y / (sb_rect.height.max(1) as f64)).clamp(0.0, 1.0);
+                    match app.active_panel {
+                        ActivePanel::Queue => {
+                            let total = app.playlist.len();
+                            if total > 0 {
+                                let target = (ratio * total as f64).round() as usize;
+                                app.queue_cursor = target.min(total.saturating_sub(1));
+                            }
+                        }
+                        ActivePanel::Library => {
+                            let total = app.flat_library.len() + 1;
+                            if total > 0 {
+                                let target = (ratio * total as f64).round() as usize;
+                                app.library_cursor = target.min(total.saturating_sub(1));
+                            }
+                        }
+                        ActivePanel::Search => {
+                            let total = app.search_results.len();
+                            if total > 0 {
+                                let target = (ratio * total as f64).round() as usize;
+                                app.search_cursor = target.min(total.saturating_sub(1));
+                            }
+                        }
+                        _ => {}
+                    }
+                    app.refresh_needed = true;
+                    return;
+                }
+            }
+
+            // 2. Progress bar click & drag (direct seek)
+            if let Some(bar_rect) = app.ui_bounds.progress_bar_rect {
+                if y == bar_rect.y && x >= bar_rect.x && x < bar_rect.x + bar_rect.width {
+                    let denom = bar_rect.width.saturating_sub(1).max(1);
+                    let ratio = ((x.saturating_sub(bar_rect.x) as f64) / (denom as f64)).min(1.0);
+                    app.seek_to_ratio(ratio);
+                    app.refresh_needed = true;
+                    return;
+                }
+            }
+
+            // For discrete click actions (tabs, mini-controls, web search, item play):
+            // Only process on Down, not on Drag
+            if let MouseEventKind::Drag(_) = mouse.kind {
+                return;
+            }
+
+            // 3. Footer tab click
+            if let Some(footer_rect) = app.ui_bounds.footer_tabs_rect {
+                if y == footer_rect.y && x >= footer_rect.x && x < footer_rect.x + footer_rect.width
+                {
+                    let rel_x = x - footer_rect.x;
+                    let tab_width = footer_rect.width / 5;
+                    let selected_tab = if tab_width > 0 {
+                        (rel_x / tab_width).min(4)
+                    } else {
+                        0
+                    };
+
+                    let prev_panel = app.active_panel;
+                    match selected_tab {
+                        0 => app.active_panel = ActivePanel::Queue,
+                        1 => app.active_panel = ActivePanel::Library,
+                        2 => app.active_panel = ActivePanel::NowPlaying,
+                        3 => {
+                            app.active_panel = ActivePanel::Search;
+                            app.searching = true;
+                        }
+                        _ => app.active_panel = ActivePanel::Help,
+                    }
+
+                    if prev_panel == ActivePanel::Search && app.active_panel != ActivePanel::Search
+                    {
+                        app.searching = false;
+                        app.search_query.clear();
+                    }
+                    app.refresh_needed = true;
+                    return;
+                }
+            }
+
+            // 4. Mini-controls click (rendered in left pane directly below album art in Queue/Library/Search/Help)
+            if let Some(mini_rect) = app.ui_bounds.mini_controls_rect {
+                if y == mini_rect.y && x >= mini_rect.x && x < mini_rect.x + mini_rect.width {
+                    // Total width of "⏮   ▶   ⏭   +   -   ∅" is 21 cells
+                    let total_w: u16 = 21;
+                    let indent = mini_rect.x + (mini_rect.width.saturating_sub(total_w)) / 2;
+
+                    // Button layout with 4-cell centers:
+                    // col 0: ⏮  (cols 0..1)
+                    // col 4: ▶/⏸ (cols 2..5)
+                    // col 8: ⏭  (cols 6..9)
+                    // col 12: +  (cols 10..13)
+                    // col 16: -  (cols 14..17)
+                    // col 20: ∅  (cols 18+)
+                    if x < indent + 2 {
+                        app.prev_track();
+                    } else if x < indent + 6 {
+                        app.toggle_pause();
+                    } else if x < indent + 10 {
+                        app.next_track();
+                    } else if x < indent + 14 {
+                        app.volume_up();
+                    } else if x < indent + 18 {
+                        app.volume_down();
+                    } else {
+                        app.clear_playlist();
+                    }
+                    app.refresh_needed = true;
+                    return;
+                }
+            }
+
+            // 5. Song Title & Artist click -> Google search ONLY in Track tab (NowPlaying)
+            if app.active_panel == ActivePanel::NowPlaying {
+                if let Some(title_rect) = app.ui_bounds.title_rect {
+                    if y == title_rect.y && x >= title_rect.x && x < title_rect.x + title_rect.width
+                    {
+                        app.search_song_web();
+                        return;
+                    }
+                }
+
+                if let Some(artist_rect) = app.ui_bounds.artist_rect {
+                    if y == artist_rect.y
+                        && x >= artist_rect.x
+                        && x < artist_rect.x + artist_rect.width
+                    {
+                        app.search_artist_web();
+                        return;
+                    }
+                }
+            }
+
+            // 6. Left panel list item click (Queue / Library / Search)
+            if let Some(panel_rect) = app.ui_bounds.left_panel_rect {
+                let is_on_scrollbar = app
+                    .ui_bounds
+                    .scrollbar_rect
+                    .map(|sb| x >= sb.x)
+                    .unwrap_or(false)
+                    || x >= panel_rect.x + panel_rect.width.saturating_sub(1);
+
+                if !is_on_scrollbar
+                    && x >= panel_rect.x
+                    && x < panel_rect.x + panel_rect.width
+                    && y >= panel_rect.y
+                    && y < panel_rect.y + panel_rect.height
+                {
+                    let clicked_row = (y - panel_rect.y) as usize;
+                    match app.active_panel {
+                        ActivePanel::Queue => {
+                            let visual_items = app
+                                .playlist
+                                .get_visual_items(app.show_folders, app.config.strip_track_numbers);
+                            let visible_height = panel_rect.height as usize;
+                            let half = visible_height / 2;
+                            let mut highlighted_idx = 0;
+                            for (idx, item) in visual_items.iter().enumerate() {
+                                if let crate::data::playlist::QueueVisualItem::Track {
+                                    entry_idx,
+                                    ..
+                                } = item
+                                {
+                                    if *entry_idx == app.queue_cursor {
+                                        highlighted_idx = idx;
+                                        break;
+                                    }
+                                }
+                            }
+                            let scroll = highlighted_idx
+                                .saturating_sub(half)
+                                .min(visual_items.len().saturating_sub(1));
+                            let item_idx = scroll + clicked_row;
+                            let clicked_entry = if item_idx < visual_items.len() {
+                                if let crate::data::playlist::QueueVisualItem::Track {
+                                    entry_idx,
+                                    ..
+                                } = &visual_items[item_idx]
+                                {
+                                    Some(*entry_idx)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            drop(visual_items);
+
+                            if let Some(entry_idx) = clicked_entry {
+                                if app.queue_cursor == entry_idx {
+                                    handle_enter(app);
+                                } else {
+                                    app.queue_cursor = entry_idx;
+                                }
+                            }
+                        }
+                        ActivePanel::Library => {
+                            let visible_height = panel_rect.height as usize;
+                            let total_items = app.flat_library.len() + 1;
+                            let scroll =
+                                if visible_height > 0 && app.library_cursor >= visible_height {
+                                    app.library_cursor - visible_height + 1
+                                } else {
+                                    0
+                                }
+                                .min(total_items.saturating_sub(1));
+                            let target_cursor = scroll + clicked_row;
+                            if target_cursor < total_items {
+                                if app.library_cursor == target_cursor {
+                                    handle_enter(app);
+                                } else {
+                                    app.library_cursor = target_cursor;
+                                }
+                            }
+                        }
+                        ActivePanel::Search => {
+                            if clicked_row >= 2 {
+                                let list_row = clicked_row - 2;
+                                let results_height = panel_rect.height.saturating_sub(2) as usize;
+                                let scroll =
+                                    if results_height > 0 && app.search_cursor >= results_height {
+                                        app.search_cursor - results_height + 1
+                                    } else {
+                                        0
+                                    }
+                                    .min(app.search_results.len().saturating_sub(1));
+                                let target_idx = scroll + list_row;
+                                if target_idx < app.search_results.len() {
+                                    if app.search_cursor == target_idx {
+                                        handle_enter(app);
+                                    } else {
+                                        app.search_cursor = target_idx;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    app.refresh_needed = true;
+                }
+            }
         }
         MouseEventKind::ScrollUp => scroll_up(app),
         MouseEventKind::ScrollDown => scroll_down(app),

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use rodio::source::SeekError;
 use rodio::Source;
-use symphonia::core::audio::SampleBuffer;
+use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
@@ -58,6 +58,7 @@ pub struct SymphoniaSource {
     total_duration: Option<Duration>,
 
     conv_buf: Option<SampleBuffer<f32>>,
+    current_spec: Option<SignalSpec>,
     sample_buf: Vec<f32>,
     sample_idx: usize,
 }
@@ -130,7 +131,7 @@ impl SymphoniaSource {
             .make(&track.codec_params, &DecoderOptions::default())
             .map_err(|e| format!("Failed to instantiate codec decoder: {}", e))?;
 
-        Ok(Self {
+        let mut source = Self {
             format,
             decoder,
             track_id,
@@ -138,9 +139,69 @@ impl SymphoniaSource {
             sample_rate,
             total_duration,
             conv_buf: None,
+            current_spec: None,
             sample_buf: Vec::new(),
             sample_idx: 0,
-        })
+        };
+
+        // Pre-decode the first audio packet so that sample_rate and channels
+        // accurately reflect the decoded bitstream rather than container headers
+        // (e.g. 96kHz AAC in M4A containers declaring 48kHz base headers).
+        source.fill_buffer();
+
+        Ok(source)
+    }
+
+    /// Attempts to decode the next packet and fill `sample_buf`.
+    /// Returns `true` if samples were buffered, or `false` on EOF / unrecoverable error.
+    fn fill_buffer(&mut self) -> bool {
+        loop {
+            match self.format.next_packet() {
+                Ok(packet) => {
+                    if packet.track_id() != self.track_id {
+                        continue;
+                    }
+                    match self.decoder.decode(&packet) {
+                        Ok(decoded) => {
+                            let spec = *decoded.spec();
+                            // Update sample rate and channels if they differ from initial metadata
+                            self.sample_rate = spec.rate;
+                            self.channels = spec.channels.count() as u16;
+
+                            if self.conv_buf.is_none()
+                                || self.conv_buf.as_ref().unwrap().capacity() < decoded.capacity()
+                                || self.current_spec != Some(spec)
+                            {
+                                self.conv_buf =
+                                    Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
+                                self.current_spec = Some(spec);
+                            }
+                            if let Some(ref mut conv) = self.conv_buf {
+                                conv.copy_interleaved_ref(decoded);
+                                self.sample_buf.clear();
+                                self.sample_buf.extend_from_slice(conv.samples());
+                                self.sample_idx = 0;
+                                return !self.sample_buf.is_empty();
+                            }
+                        }
+                        Err(Error::DecodeError(_)) => {
+                            // Non-fatal frame decode error: skip to next packet
+                            continue;
+                        }
+                        Err(_) => {
+                            // Fatal decoder error
+                            return false;
+                        }
+                    }
+                }
+                Err(Error::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return false;
+                }
+                Err(_) => {
+                    return false;
+                }
+            }
+        }
     }
 }
 
@@ -155,44 +216,8 @@ impl Iterator for SymphoniaSource {
                 return Some(sample);
             }
 
-            match self.format.next_packet() {
-                Ok(packet) => {
-                    if packet.track_id() != self.track_id {
-                        continue;
-                    }
-                    match self.decoder.decode(&packet) {
-                        Ok(decoded) => {
-                            if self.conv_buf.is_none()
-                                || self.conv_buf.as_ref().unwrap().capacity() < decoded.capacity()
-                            {
-                                self.conv_buf = Some(SampleBuffer::<f32>::new(
-                                    decoded.capacity() as u64,
-                                    *decoded.spec(),
-                                ));
-                            }
-                            if let Some(ref mut conv) = self.conv_buf {
-                                conv.copy_interleaved_ref(decoded);
-                                self.sample_buf.clear();
-                                self.sample_buf.extend_from_slice(conv.samples());
-                                self.sample_idx = 0;
-                            }
-                        }
-                        Err(Error::DecodeError(_)) => {
-                            // Non-fatal frame decode error: skip to next packet
-                            continue;
-                        }
-                        Err(_) => {
-                            // Fatal decoder error
-                            return None;
-                        }
-                    }
-                }
-                Err(Error::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return None;
-                }
-                Err(_) => {
-                    return None;
-                }
+            if !self.fill_buffer() {
+                return None;
             }
         }
     }

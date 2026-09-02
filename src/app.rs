@@ -106,6 +106,32 @@ pub struct App {
     pub force_terminal_clear: bool,
     /// Last active lyric line index (tracked for clean repaint on line transition).
     pub last_lyric_line: Option<usize>,
+    /// Bounding boxes of interactive UI elements for mouse hit testing.
+    pub ui_bounds: UiBounds,
+}
+
+/// Hit-test regions recorded during render for mouse click routing.
+#[derive(Debug, Clone, Default)]
+pub struct UiBounds {
+    pub left_panel_rect: Option<ratatui::layout::Rect>,
+    pub mini_controls_rect: Option<ratatui::layout::Rect>,
+    pub progress_bar_rect: Option<ratatui::layout::Rect>,
+    pub title_rect: Option<ratatui::layout::Rect>,
+    pub artist_rect: Option<ratatui::layout::Rect>,
+    pub footer_tabs_rect: Option<ratatui::layout::Rect>,
+    pub scrollbar_rect: Option<ratatui::layout::Rect>,
+}
+
+impl UiBounds {
+    pub fn reset(&mut self) {
+        self.left_panel_rect = None;
+        self.mini_controls_rect = None;
+        self.progress_bar_rect = None;
+        self.title_rect = None;
+        self.artist_rect = None;
+        self.footer_tabs_rect = None;
+        self.scrollbar_rect = None;
+    }
 }
 
 impl App {
@@ -178,6 +204,7 @@ impl App {
             vis_wake_tx: Some(vis_wake_tx),
             force_terminal_clear: false,
             last_lyric_line: None,
+            ui_bounds: UiBounds::default(),
         };
 
         // Load library: use cache for instant display, rescan in background for freshness
@@ -368,6 +395,9 @@ impl App {
             &self.collapsed_dirs,
             &self.playlist.entry_paths,
         );
+        if self.library_cursor > self.flat_library.len() {
+            self.library_cursor = self.flat_library.len();
+        }
     }
 
     /// Rebuild BOTH flat views. Called only when the raw library data changes
@@ -382,6 +412,9 @@ impl App {
             &self.collapsed_dirs,
             &self.playlist.entry_paths,
         );
+        if self.library_cursor > self.flat_library.len() {
+            self.library_cursor = self.flat_library.len();
+        }
         // full_flat_library: fully expanded, used for instant fuzzy search.
         // No collapsed dirs, but enqueued bools still computed from playlist.
         self.full_flat_library = library::flatten_library(
@@ -567,16 +600,15 @@ impl App {
                         // Sync queue cursor with currently playing track
                         self.queue_cursor = self.playlist.current_real_index().unwrap_or(0);
 
-                        // Send desktop notification if terminal is not in focus
-                        if !self.terminal_focused {
+                        // Send native desktop notification if enabled
+                        if self.config.desktop_notifications {
                             if let Some(ref meta) = self.now_playing_meta {
                                 let title = meta.display_title(self.config.strip_track_numbers);
                                 let artist = meta.display_artist();
-                                let body = format!("Current Song: {} - {}", title, artist);
-                                let _ = std::process::Command::new("notify-send")
-                                    .arg("mixed")
-                                    .arg(&body)
-                                    .spawn();
+                                let album = meta.display_album();
+                                crate::sys::notifications::show_notification(
+                                    &title, &artist, &album,
+                                );
                             }
                         }
 
@@ -610,6 +642,12 @@ impl App {
                     }
                 }
             }
+        } else {
+            self.stop();
+            self.now_playing_meta = None;
+            self.current_cover_protocol = None;
+            self.current_lyrics = None;
+            self.refresh_needed = true;
         }
     }
 
@@ -700,13 +738,24 @@ impl App {
             return;
         }
 
-        self.playlist.advance_track();
+        if !self.playlist.advance_track() {
+            self.stop();
+            self.refresh_needed = true;
+            return;
+        }
+
         self.play_current();
         self.refresh_needed = true;
     }
 
     pub fn prev_track(&mut self) {
         if self.playlist.is_empty() {
+            return;
+        }
+        // If track has been playing for more than 3 seconds, restart current track
+        if self.display_elapsed_secs() > 3.0 {
+            self.seek_to_ratio(0.0);
+            self.refresh_needed = true;
             return;
         }
         self.playlist.prev();
@@ -979,8 +1028,15 @@ impl App {
                         i += 1;
                     }
                 }
+                if self.playlist.is_empty() {
+                    self.clear_playlist();
+                    return;
+                }
                 if current_removed {
                     self.play_current();
+                }
+                if self.queue_cursor >= self.playlist.len() && !self.playlist.is_empty() {
+                    self.queue_cursor = self.playlist.len() - 1;
                 }
             } else {
                 // Enqueue all library tracks (in-memory, no disk read!)
@@ -1114,8 +1170,15 @@ impl App {
                     if let Some(pos) = self.playlist.entries.iter().position(|e| e.path == path) {
                         let is_current = Some(pos) == self.playlist.current_real_index();
                         self.playlist.remove(pos);
+                        if self.playlist.is_empty() {
+                            self.clear_playlist();
+                            return;
+                        }
                         if is_current {
                             self.play_current();
+                        }
+                        if self.queue_cursor >= self.playlist.len() && !self.playlist.is_empty() {
+                            self.queue_cursor = self.playlist.len() - 1;
                         }
                     }
                 } else {
@@ -1177,8 +1240,15 @@ impl App {
                             i += 1;
                         }
                     }
+                    if self.playlist.is_empty() {
+                        self.clear_playlist();
+                        return;
+                    }
                     if current_removed {
                         self.play_current();
+                    }
+                    if self.queue_cursor >= self.playlist.len() && !self.playlist.is_empty() {
+                        self.queue_cursor = self.playlist.len() - 1;
                     }
                 } else {
                     // Enqueue
@@ -1229,8 +1299,15 @@ impl App {
                     if let Some(pos) = self.playlist.entries.iter().position(|e| e.path == path) {
                         let is_current = Some(pos) == self.playlist.current_real_index();
                         self.playlist.remove(pos);
+                        if self.playlist.is_empty() {
+                            self.clear_playlist();
+                            return;
+                        }
                         if is_current {
                             self.play_current();
+                        }
+                        if self.queue_cursor >= self.playlist.len() && !self.playlist.is_empty() {
+                            self.queue_cursor = self.playlist.len() - 1;
                         }
                     }
                 } else {
@@ -1323,4 +1400,94 @@ impl App {
         print!("\x1b]0;mixed\x07");
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
+
+    /// Seek directly to a position specified as a ratio [0.0, 1.0] of total duration.
+    pub fn seek_to_ratio(&mut self, ratio: f64) {
+        let duration_ms = self.player.as_ref().map(|p| p.duration_ms()).unwrap_or(0);
+        if duration_ms > 0 {
+            let target_ms = (duration_ms as f64 * ratio.clamp(0.0, 1.0)) as u64;
+            self.pending_seek = Some(std::time::Duration::from_millis(target_ms));
+            self.last_seek_input = Some(std::time::Instant::now());
+            self.refresh_needed = true;
+        }
+    }
+
+    /// Launch web browser searching Google for the current artist: "Artist: <name>"
+    pub fn search_artist_web(&self) {
+        if let Some(ref meta) = self.now_playing_meta {
+            let artist = meta.display_artist();
+            if !artist.is_empty() && artist != "Unknown Artist" {
+                let query = format!("Artist: {}", artist);
+                let encoded = url_encode(&query);
+                let url = format!("https://www.google.com/search?q={}", encoded);
+                open_browser_url(url);
+            }
+        }
+    }
+
+    /// Launch web browser searching Google for the current song: "Song: <title> <artist>"
+    pub fn search_song_web(&self) {
+        if let Some(ref meta) = self.now_playing_meta {
+            let title = meta.display_title(self.config.strip_track_numbers);
+            let artist = meta.display_artist();
+            let query = if !artist.is_empty() && artist != "Unknown Artist" {
+                format!("Song: {} {}", title, artist)
+            } else {
+                format!("Song: {}", title)
+            };
+            let encoded = url_encode(&query);
+            let url = format!("https://www.google.com/search?q={}", encoded);
+            open_browser_url(url);
+        }
+    }
+}
+
+/// Helper to percent-encode query strings for search URLs.
+fn url_encode(s: &str) -> String {
+    let mut result = String::new();
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(b as char);
+            }
+            b' ' => result.push('+'),
+            _ => {
+                result.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    result
+}
+
+/// Open a URL in the user's default browser on a detached thread without blocking TUI or bleeding output.
+fn open_browser_url(url: String) {
+    std::thread::spawn(move || {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open")
+                .arg(&url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open")
+                .arg(&url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "start", &url])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    });
 }

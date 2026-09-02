@@ -5,6 +5,47 @@ All notable changes to the **mixed** music player will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-09-03
+
+### Added
+- **Interactive Mini-Controls in Left Pane**:
+  - Compact, responsive transport widget (`[⏮  ▶/⏸  ⏭  +  -  ∅]`) displayed directly below the album art in the left pane across Playlist (F2), Library (F3), Search (F5), and Help (F6) tabs.
+  - Album art and mini-controls are vertically centered together as a cohesive block in the middle of the left pane.
+  - Dedicated mouse click targets with exact column periodic alignment for Previous, Play/Pause, Next, Volume Up/Down, and Clear Playlist (`∅`).
+- **Visual Scrollbars on Lists**:
+  - Vertical scrollbars (`ratatui::widgets::Scrollbar`) rendered alongside Playlist, Library, and Search result lists when content overflows screen height.
+  - Clean, line-free aesthetic: track lines and arrows removed, keeping only the solid thumb handle block (`█`) moving with scroll position.
+  - Full mouse click and drag seeking supported along the scrollbar track.
+- **Native Desktop Notifications (Linux)**:
+  - Track change notifications sent over D-Bus (`org.freedesktop.Notifications`) displaying song title, artist, and album.
+- **Instant Browser Web Search for Song & Artist**:
+  - Search the current track title or artist directly in your default web browser (Google Search).
+  - Press `b` / `B` from anywhere to look up the currently playing artist.
+  - In the Track (Now Playing, F4) tab, click directly on the song title to search for the song, or click on the artist name to search for the artist.
+  - Fully isolated process execution: subprocess stdio is redirected to `/dev/null` to prevent browser warnings and D-Bus diagnostic logs from bleeding into the terminal.
+- **Self-Contained Integration Test Suite**:
+  - Added comprehensive test suite documentation in `tests/README.md` and automated headless tests for mini-controls, scrollbar interactions, and playback edge cases.
+
+### Fixed
+- **Playlist End Loop on Repeat Off**:
+  - Fixed an issue where reaching the end of the playlist with `RepeatMode::Off` restarted the final track indefinitely instead of halting playback.
+- **Smart `prev_track` Behavior**:
+  - Pressing Previous Track (`⏮`) now restarts the current track from `0:00` if more than 3 seconds have elapsed (matching standard media player behavior), and skips to the previous song otherwise.
+- **Queue Deletion & Dequeue Ghost State**:
+  - Deleting or dequeueing the final track in the playlist now cleanly halts playback, cleans up temporary cover files, and resets UI/MPRIS state.
+- **Search Cursor Clamping**:
+  - Clamped `search_cursor` on `Down` key presses, preventing cursor drift past search results.
+- **Directory Collapse Cursor Stranding**:
+  - Clamped `library_cursor` to visible items when collapsing parent directories.
+- **Progress Bar 100% Edge Seeking**:
+  - Fixed denominator calculation to allow clicking the rightmost cell to seek to 100%.
+- **Browser Search Terminal Output Bleed**:
+  - Redirected `stdin`, `stdout`, and `stderr` to null when opening web search URLs, preventing browser diagnostic output from corrupting the TUI.
+- **Terminal Height Underflow Guard**:
+  - Added safety guard when terminal height is < 10 rows to prevent vertical layout split underflows.
+
+---
+
 ## [1.4.3] - 2026-08-26
 
 ### Fixed

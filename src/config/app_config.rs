@@ -19,6 +19,13 @@ pub struct AppConfig {
     pub color_scheme: usize,
     /// Whether to strip track numbers from display titles.
     pub strip_track_numbers: bool,
+    /// Whether desktop notifications are enabled on song change.
+    #[serde(default = "default_true")]
+    pub desktop_notifications: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -31,6 +38,7 @@ impl Default for AppConfig {
             cover_enabled: true,
             color_scheme: 0,
             strip_track_numbers: true,
+            desktop_notifications: true,
         }
     }
 }

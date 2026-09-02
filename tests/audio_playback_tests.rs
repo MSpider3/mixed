@@ -203,24 +203,82 @@ fn test_visualizer_pipeline_shared_buffer_and_fft() {
     );
 }
 
-#[test]
-fn test_symphonia_source_real_m4a_if_available() {
-    let path = "/run/media/mehulgolecha/OS/New folder/Spotify_playlist/01 - QUEEN BEE.m4a";
-    if !std::path::Path::new(path).exists() {
-        return;
+/// Helper to create a valid synthetic PCM WAV audio file for self-contained testing.
+fn create_synthetic_wav(sample_rate: u32, channels: u16, duration_secs: f32) -> std::path::PathBuf {
+    let num_samples = (sample_rate as f32 * duration_secs) as usize;
+    let mut data = Vec::new();
+
+    // RIFF header
+    data.extend_from_slice(b"RIFF");
+    let total_size = 36 + (num_samples * channels as usize * 2) as u32;
+    data.extend_from_slice(&total_size.to_le_bytes());
+    data.extend_from_slice(b"WAVE");
+
+    // fmt chunk
+    data.extend_from_slice(b"fmt ");
+    data.extend_from_slice(&16u32.to_le_bytes()); // Chunk size 16 for PCM
+    data.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+    data.extend_from_slice(&channels.to_le_bytes());
+    data.extend_from_slice(&sample_rate.to_le_bytes());
+    let byte_rate = sample_rate * channels as u32 * 2;
+    data.extend_from_slice(&byte_rate.to_le_bytes());
+    let block_align = channels * 2;
+    data.extend_from_slice(&block_align.to_le_bytes());
+    data.extend_from_slice(&16u16.to_le_bytes()); // Bits per sample
+
+    // data chunk
+    data.extend_from_slice(b"data");
+    let data_size = (num_samples * channels as usize * 2) as u32;
+    data.extend_from_slice(&data_size.to_le_bytes());
+
+    for i in 0..num_samples {
+        let t = i as f32 / sample_rate as f32;
+        let val = (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+        let sample = (val * 16000.0) as i16;
+        for _ in 0..channels {
+            data.extend_from_slice(&sample.to_le_bytes());
+        }
     }
 
-    let mut source = SymphoniaSource::open_file(path).expect("Failed to open real m4a file");
-    assert!(source.channels() >= 1);
-    assert!(source.sample_rate() > 0);
+    let path =
+        std::env::temp_dir().join(format!("mixed_test_{}ch_{}hz.wav", channels, sample_rate));
+    std::fs::write(&path, data).expect("Failed to write synthetic wav");
+    path
+}
+
+#[test]
+fn test_symphonia_source_synthetic_wav_playback_and_seeking() {
+    let wav_path = create_synthetic_wav(44100, 2, 3.0);
+    let path_str = wav_path.to_str().unwrap();
+
+    let mut source =
+        SymphoniaSource::open_file(path_str).expect("Failed to open synthetic WAV file");
+    assert_eq!(
+        source.channels(),
+        2,
+        "Synthetic WAV should be stereo (2 channels)"
+    );
+    assert_eq!(
+        source.sample_rate(),
+        44100,
+        "Synthetic WAV should have 44100 Hz sample rate"
+    );
 
     // Read first 1024 samples
     let samples: Vec<f32> = source.by_ref().take(1024).collect();
     assert_eq!(samples.len(), 1024, "Should read 1024 audio samples");
+    let max_sample = samples
+        .iter()
+        .cloned()
+        .fold(0.0f32, |acc, x| acc.max(x.abs()));
+    assert!(
+        max_sample > 0.1,
+        "Samples should contain non-silent audio data"
+    );
 
-    // Test seek to 5 seconds
-    let seek_res = source.try_seek(Duration::from_secs(5));
-    assert!(seek_res.is_ok(), "Seek to 5s should succeed on real m4a");
+    // Test seek to 1 second
+    let seek_res = source.try_seek(Duration::from_secs(1));
+    assert!(seek_res.is_ok(), "Seek to 1s should succeed on WAV");
 
     // Read 512 samples after seek
     let samples_after_seek: Vec<f32> = source.by_ref().take(512).collect();
@@ -229,4 +287,50 @@ fn test_symphonia_source_real_m4a_if_available() {
         512,
         "Should read samples after seek"
     );
+
+    let _ = std::fs::remove_file(wav_path);
+}
+
+#[test]
+fn test_symphonia_source_high_res_96khz_detection() {
+    let wav_path = create_synthetic_wav(96000, 2, 2.0);
+    let path_str = wav_path.to_str().unwrap();
+
+    let mut source = SymphoniaSource::open_file(path_str).expect("Failed to open 96kHz WAV file");
+    assert_eq!(source.channels(), 2, "Channel count should be 2");
+    assert_eq!(
+        source.sample_rate(),
+        96000,
+        "Sample rate should accurately detect 96000 Hz"
+    );
+
+    // Read 2048 samples
+    let samples: Vec<f32> = source.by_ref().take(2048).collect();
+    assert_eq!(samples.len(), 2048, "Should decode 2048 samples at 96kHz");
+
+    let max_sample = samples
+        .iter()
+        .cloned()
+        .fold(0.0f32, |acc, x| acc.max(x.abs()));
+    assert!(
+        max_sample > 0.1,
+        "Decoded samples should contain audio data"
+    );
+
+    let _ = std::fs::remove_file(wav_path);
+}
+
+#[test]
+fn test_symphonia_source_optional_external_file() {
+    // If developer specifies TEST_AUDIO_FILE in env, verify it
+    if let Ok(path) = std::env::var("TEST_AUDIO_FILE") {
+        if std::path::Path::new(&path).exists() {
+            let mut source =
+                SymphoniaSource::open_file(&path).expect("Failed to open TEST_AUDIO_FILE");
+            assert!(source.channels() >= 1);
+            assert!(source.sample_rate() > 0);
+            let samples: Vec<f32> = source.by_ref().take(1024).collect();
+            assert_eq!(samples.len(), 1024);
+        }
+    }
 }

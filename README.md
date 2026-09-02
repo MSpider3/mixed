@@ -63,6 +63,21 @@ Intelligent, adaptive rendering powered by `crossbeam_channel::select!` multiple
 ### 🖼 Sixel & Kitty Cover Art
 Album art is rendered directly in the terminal using high-performance image protocols (Sixel and Kitty Graphics Protocol) powered by `ratatui-image`. To see high-resolution cover art, use an image-enabled terminal emulator such as Kitty, WezTerm, Foot, Konsole, or Alacritty (v0.14+ with Sixel support enabled). The player automatically falls back to a text placeholder if image protocols are unsupported.
 
+### 🎛️ Interactive Mini-Controls & Centered Layout
+A sleek, responsive transport widget (`[⏮  ▶/⏸  ⏭  +  -  ∅]`) is positioned directly beneath the album art in the left pane across the **Playlist (F2)**, **Library (F3)**, **Search (F5)**, and **Help (F6)** tabs. Both cover art and mini-controls are vertically centered together as a unified block in the middle of the left pane, featuring dedicated mouse hit targets for Previous, Play/Pause, Next, Volume adjustments, and Playlist clearing (`∅`).
+
+### 📜 Line-Free Visual Scrollbars
+Lists across the Playlist, Library, and Search views feature visual vertical scrollbars (`ratatui::widgets::Scrollbar`) when content overflows screen height. Designed with a clean, modern aesthetic: track lines and arrows are omitted, showing only the solid handle block (`█`) with full mouse click and drag seeking support.
+
+### 🔔 Native Desktop Notifications (Linux)
+Native desktop notifications are automatically dispatched over D-Bus (`org.freedesktop.Notifications`) whenever tracks change, displaying the song title, artist, and album without interrupting terminal focus.
+
+### 🌐 Instant Browser Search for Song & Artist
+Quickly explore artist discography, lyrics, or background information in your default web browser (Google Search):
+- Press `b` or `B` anywhere to immediately launch a web search for the currently playing artist.
+- In the **Track (F4)** view, click directly on the **song title** to search for the song, or click the **artist name** to search for the artist.
+- All browser subcommands run with isolated `stdio` redirected to `/dev/null`, preventing any external browser warnings or logs from corrupting the TUI.
+
 ---
 
 ## Installation
@@ -74,10 +89,10 @@ Album art is rendered directly in the terminal using high-performance image prot
 You can download the pre-compiled binary for your system from the **[Releases](../../releases)** page.
 
 #### Linux (x86_64)
-1. Download `mixed-v1.4.2-x86_64-unknown-linux-gnu.tar.gz`.
+1. Download `mixed-v1.5.0-x86_64-unknown-linux-gnu.tar.gz`.
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v1.4.2-x86_64-unknown-linux-gnu.tar.gz
+   tar -xzf mixed-v1.5.0-x86_64-unknown-linux-gnu.tar.gz
    ```
 3. Move the `mixed` binary to your system PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -86,10 +101,10 @@ You can download the pre-compiled binary for your system from the **[Releases](.
 4. Run the player by typing `mixed` in your terminal.
 
 #### macOS (Apple Silicon or Intel)
-1. Download either `mixed-v1.4.2-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v1.4.2-x86_64-apple-darwin.tar.gz` (Intel).
+1. Download either `mixed-v1.5.0-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v1.5.0-x86_64-apple-darwin.tar.gz` (Intel).
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v1.4.2-*.tar.gz
+   tar -xzf mixed-v1.5.0-*.tar.gz
    ```
 3. Move `mixed` to a directory in your PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -101,7 +116,7 @@ You can download the pre-compiled binary for your system from the **[Releases](.
    ```
 
 #### Windows (x86_64)
-1. Download `mixed-v1.4.2-x86_64-pc-windows-msvc.zip`.
+1. Download `mixed-v1.5.0-x86_64-pc-windows-msvc.zip`.
 2. Extract the `.zip` file.
 3. Move `mixed.exe` to a folder of your choice and run it in a terminal emulator (Windows Terminal, PowerShell, or Command Prompt).
 
@@ -149,7 +164,9 @@ mixed --play /path/to/song.flac
 
 ---
 
-## Keybind Reference
+## Keybind & Mouse Reference
+
+### Keyboard Controls
 
 | Keybind | Action | Context |
 |---|---|---|
@@ -160,7 +177,7 @@ mixed --play /path/to/song.flac
 | `Space` / `p` | Play / Pause toggle | Playback |
 | `S` | Stop playback | Playback |
 | `n` / `l` / `→` | Next track | Playback |
-| `p` / `h` / `←` | Previous track | Playback |
+| `p` / `h` / `←` | Previous track (restarts track if >3s elapsed) | Playback |
 | `a` / `d` | Seek backward / forward 5 seconds | Playback |
 | `+` / `=` | Volume up | Playback |
 | `-` / `[` | Volume down | Playback |
@@ -175,6 +192,26 @@ mixed --play /path/to/song.flac
 | `/` | Open search prompt to filter library | Library |
 | `v` | Toggle spectrum/braille visualizer mode | Display |
 | `m` | Toggle full lyrics / 3-line timed lyrics view | Display |
+| `b` / `B` | Search artist in default web browser | Web Search |
+
+### Mouse Interaction
+
+- **Left Pane Mini-Controls**: Click `⏮`, `▶ / ⏸`, `⏭`, `+`, `-`, or `∅` directly beneath the cover art.
+- **Progress Bar**: Click or drag anywhere on the progress bar to seek instantly.
+- **Scrollbar**: Click or drag along the vertical scrollbar track to jump through lists.
+- **Footer Tabs**: Click on `F2 Playlist`, `F3 Library`, `F4 Track`, `F5 Search`, or `F6 Help` to switch views.
+- **Track & Artist Search**: In the Track (F4) tab, click the song title or artist name to launch an instant web search.
+
+---
+
+## Testing & Verification
+
+`mixed` includes a fully self-contained test suite with synthetic audio decoders and headless TUI integration tests. See [`tests/README.md`](tests/README.md) for full testing instructions.
+
+```bash
+# Run all tests
+cargo test
+```
 
 ---
 

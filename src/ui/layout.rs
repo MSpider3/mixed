@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Gauge, List, ListItem, Paragraph},
+    widgets::{Gauge, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
@@ -45,22 +45,25 @@ fn render_instructions(f: &mut Frame, area: Rect, panel: ActivePanel) {
 
 /// Main render function — dispatches to the appropriate view inside a global two-pane layout.
 pub fn draw(f: &mut Frame, app: &mut App) {
+    app.ui_bounds.reset();
     let size = f.area();
 
-    // Screen-size guard: the layout requires at least 90 columns to render correctly.
-    // On narrow terminals, show a friendly prompt instead of squashing the two-pane layout.
-    if size.width < 90 {
-        let msg = format!(
-            "Terminal window is too narrow for two-pane layout.\n\n\
-             Current terminal: {} \u{00d7} {}\n\
-             Recommended: at least 90 \u{00d7} 30\n\n\
-             Please increase the terminal width or maximize the window.",
-            size.width, size.height
-        );
-        let widget = ratatui::widgets::Paragraph::new(msg)
-            .alignment(ratatui::layout::Alignment::Center)
-            .style(ratatui::style::Style::default().fg(C_ACCENT2));
-        f.render_widget(widget, size);
+    // Screen-size guard: the layout requires at least 90 columns and 10 rows to render correctly.
+    // On narrow or short terminals, show a friendly prompt instead of squashing the two-pane layout.
+    if size.width < 90 || size.height < 10 {
+        if size.width > 0 && size.height > 0 {
+            let msg = format!(
+                "Terminal window is too small for two-pane layout.\n\n\
+                 Current terminal: {} \u{00d7} {}\n\
+                 Recommended: at least 90 \u{00d7} 30\n\n\
+                 Please increase the terminal window size.",
+                size.width, size.height
+            );
+            let widget = ratatui::widgets::Paragraph::new(msg)
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(ratatui::style::Style::default().fg(C_ACCENT2));
+            f.render_widget(widget, size);
+        }
         return;
     }
 
@@ -81,7 +84,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     // Global Two-Pane Layout Split (Left Pane gets full terminal height):
-    // Left pane: Sixel artwork
+    // Left pane: Sixel artwork + Mini-Controls (in Queue, Library, Search, Help tabs)
     // Right pane: Content and footer
     let art_width = artwork::art_pane_width(size.width);
     let h_layout = Layout::default()
@@ -92,28 +95,54 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let art_area = h_layout[0];
     let right_area = h_layout[1];
 
-    // Draw floating Sixel album art in the left pane (if a song is playing/loaded and pane is visible)
-    if art_width > 0 && !app.playlist.is_empty() && art_area.height >= 8 && art_area.width >= 8 {
-        let v_split = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2), // top margin
-                Constraint::Min(4),    // middle art area
-                Constraint::Length(2), // bottom margin
-            ])
-            .split(art_area);
+    // Left pane: Sixel album art and mini-controls
+    if art_width > 0 && art_area.height >= 8 && art_area.width >= 8 {
+        let is_now_playing = app.active_panel == ActivePanel::NowPlaying;
 
-        let h_split = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(2), // left margin
-                Constraint::Min(4),    // middle art area
-                Constraint::Length(2), // right margin
-            ])
-            .split(v_split[1]);
+        if !is_now_playing {
+            // Queue, Library, Search, Help tabs: Both album art and mini-controls are vertically centered together in the middle of the left pane
+            let left_margin = 2;
+            let right_margin = 2;
+            let max_w = art_area.width.saturating_sub(left_margin + right_margin);
 
-        let centered_art_area = h_split[1];
-        artwork::render_artwork(f, centered_art_area, &mut app.current_cover_protocol);
+            let aspect_ratio = artwork::get_cell_aspect_ratio();
+            let h_if_full_w = (max_w as f32 / aspect_ratio) as u16;
+            // Reserve 2 vertical lines for spacer (1) + mini-controls (1)
+            let max_art_h = art_area.height.saturating_sub(4);
+            let art_h = h_if_full_w.min(max_art_h).max(4);
+            let art_w = (((art_h as f32) * aspect_ratio) as u16).min(max_w).max(4);
+
+            // Combined block height = Album Art (art_h) + Spacer (1) + Mini-controls (1)
+            let total_block_h = art_h + 2;
+            let v_space = art_area.height.saturating_sub(total_block_h);
+            let top_offset = art_area.y + v_space / 2;
+
+            let art_x = art_area.x + (art_area.width.saturating_sub(art_w)) / 2;
+            let art_rect = Rect::new(art_x, top_offset, art_w, art_h);
+
+            if !app.playlist.is_empty() {
+                artwork::render_artwork(f, art_rect, &mut app.current_cover_protocol);
+            }
+
+            // Mini-controls placed directly below the album art, centered as part of the middle block
+            let ctrl_y = art_rect.y + art_rect.height + 1;
+            if ctrl_y < art_area.y + art_area.height {
+                let ctrl_area = Rect::new(art_area.x, ctrl_y, art_area.width, 1);
+                draw_mini_controls(f, app, ctrl_area);
+            }
+        } else {
+            // Track tab (NowPlaying): Vertically centered artwork, NO mini-controls
+            if !app.playlist.is_empty() {
+                let art_box = Rect::new(
+                    art_area.x + 2,
+                    art_area.y + 2,
+                    art_area.width.saturating_sub(4),
+                    art_area.height.saturating_sub(4),
+                );
+                let art_rect = artwork::compute_art_rect(art_box, false);
+                artwork::render_artwork(f, art_rect, &mut app.current_cover_protocol);
+            }
+        }
     }
 
     // Split the right pane vertically: Content area + Footer at the absolute bottom of the right pane
@@ -172,6 +201,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             render_instructions(f, inst_rect, app.active_panel);
         }
 
+        app.ui_bounds.left_panel_rect = Some(tab_area);
         match app.active_panel {
             ActivePanel::Queue => draw_queue(f, app, tab_area),
             ActivePanel::Library => draw_library(f, app, tab_area),
@@ -213,13 +243,13 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
     if app.show_full_lyrics {
         // Layout: Logo + Instructions + Metadata + Spacer + Scrollable Lyrics + Spacer + Progress
         let constraints = vec![
-            Constraint::Length(6), // Top Logo
-            Constraint::Length(1), // Shortcut instructions
-            Constraint::Length(3), // Metadata
-            Constraint::Length(1), // Spacer
-            Constraint::Fill(1),   // Scrollable Lyrics (THE CRITICAL EXPANSION)
-            Constraint::Length(1), // Spacer
-            Constraint::Length(2), // Progress bar + statistics
+            Constraint::Length(6), // 0. Top Logo
+            Constraint::Length(1), // 1. Shortcut instructions
+            Constraint::Length(3), // 2. Metadata
+            Constraint::Length(1), // 3. Spacer
+            Constraint::Fill(1),   // 4. Scrollable Lyrics
+            Constraint::Length(1), // 5. Spacer
+            Constraint::Length(2), // 6. Progress bar + statistics
         ];
         let layout = Layout::default()
             .direction(Direction::Vertical)
@@ -234,17 +264,17 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Normal mode: 9 steps EXACT recipe
+    // Normal mode: Logo + Instructions + Metadata + Spacer + Lyrics + Spacer + Visualizer + Spacer + Progress
     let constraints = vec![
-        Constraint::Length(6), // 1. Top Logo
-        Constraint::Length(1), // 2. Shortcut instructions
-        Constraint::Length(3), // 3. Metadata (centered)
-        Constraint::Length(1), // 4. Spacer
-        Constraint::Length(3), // 5. Lyrics Engine (max 3 lines, toggleable with 'm')
-        Constraint::Length(1), // 6. Spacer
-        Constraint::Fill(1),   // 7. Visualizer (THE CRITICAL EXPANSION - absorbs remaining space)
-        Constraint::Length(1), // 8. Spacer
-        Constraint::Length(2), // 9. Bottom Progress Bar
+        Constraint::Length(6), // 0. Top Logo
+        Constraint::Length(1), // 1. Shortcut instructions
+        Constraint::Length(3), // 2. Metadata (centered)
+        Constraint::Length(1), // 3. Spacer
+        Constraint::Length(3), // 4. Lyrics Engine (max 3 lines, toggleable with 'm')
+        Constraint::Length(1), // 5. Spacer
+        Constraint::Fill(1),   // 6. Visualizer
+        Constraint::Length(1), // 7. Spacer
+        Constraint::Length(2), // 8. Bottom Progress Bar
     ];
 
     let layout = Layout::default()
@@ -260,18 +290,27 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
     draw_progress(f, app, layout[8]);
 }
 
-fn draw_metadata(f: &mut Frame, app: &App, area: Rect) {
+fn draw_metadata(f: &mut Frame, app: &mut App, area: Rect) {
     if let Some(entry) = app.playlist.current_entry() {
         let meta = &entry.metadata;
+        let title_str = meta.display_title(app.config.strip_track_numbers);
+        let title_len = unicode_width::UnicodeWidthStr::width(&title_str[..]) as u16;
+        let title_w = title_len.min(area.width);
+        let title_x = area.x + area.width.saturating_sub(title_w) / 2;
+        app.ui_bounds.title_rect = Some(Rect::new(title_x, area.y, title_w, 1));
+
+        let artist_str = meta.display_artist();
+        let artist_len = unicode_width::UnicodeWidthStr::width(&artist_str[..]) as u16;
+        let artist_w = artist_len.min(area.width);
+        let artist_x = area.x + area.width.saturating_sub(artist_w) / 2;
+        app.ui_bounds.artist_rect = Some(Rect::new(artist_x, area.y + 1, artist_w, 1));
+
         let lines = vec![
             Line::from(Span::styled(
-                meta.display_title(app.config.strip_track_numbers),
+                title_str,
                 Style::default().fg(C_FG).add_modifier(Modifier::BOLD),
             )),
-            Line::from(Span::styled(
-                meta.display_artist(),
-                Style::default().fg(C_ACCENT),
-            )),
+            Line::from(Span::styled(artist_str, Style::default().fg(C_ACCENT))),
             Line::from(Span::styled(
                 meta.display_album(),
                 Style::default().fg(C_DIM),
@@ -280,6 +319,43 @@ fn draw_metadata(f: &mut Frame, app: &App, area: Rect) {
         let widget = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
         f.render_widget(widget, area);
     }
+}
+
+fn draw_mini_controls(f: &mut Frame, app: &mut App, area: Rect) {
+    if area.height == 0 || area.width < 10 {
+        app.ui_bounds.mini_controls_rect = None;
+        return;
+    }
+    app.ui_bounds.mini_controls_rect = Some(area);
+
+    let is_paused = app.player.as_ref().map(|p| p.is_paused()).unwrap_or(true);
+    let play_symbol = if is_paused { "▶" } else { "⏸" };
+
+    let spans = vec![
+        Span::styled("⏮", Style::default().fg(C_FG).add_modifier(Modifier::BOLD)),
+        Span::styled("   ", Style::default().fg(C_DIM)),
+        Span::styled(
+            play_symbol,
+            Style::default().fg(C_ACCENT2).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   ", Style::default().fg(C_DIM)),
+        Span::styled("⏭", Style::default().fg(C_FG).add_modifier(Modifier::BOLD)),
+        Span::styled("   ", Style::default().fg(C_DIM)),
+        Span::styled(
+            "+",
+            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   ", Style::default().fg(C_DIM)),
+        Span::styled(
+            "-",
+            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   ", Style::default().fg(C_DIM)),
+        Span::styled("∅", Style::default().fg(C_DIM).add_modifier(Modifier::BOLD)),
+    ];
+
+    let widget = Paragraph::new(Line::from(spans)).alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(widget, area);
 }
 
 fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
@@ -393,8 +469,9 @@ fn draw_visualizer(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_progress(f: &mut Frame, app: &App, area: Rect) {
+fn draw_progress(f: &mut Frame, app: &mut App, area: Rect) {
     if area.height < 2 {
+        app.ui_bounds.progress_bar_rect = None;
         return;
     }
 
@@ -419,6 +496,7 @@ fn draw_progress(f: &mut Frame, app: &App, area: Rect) {
 
     // Progress bar (matches width of the centered content above it)
     let bar_area = Rect::new(active_area.x, active_area.y, active_area.width, 1);
+    app.ui_bounds.progress_bar_rect = Some(bar_area);
     let gauge = Gauge::default()
         .gauge_style(Style::default().fg(C_ACCENT2).bg(C_SURFACE))
         .ratio(ratio)
@@ -548,6 +626,22 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
 
     let widget = Paragraph::new(display_lines).alignment(ratatui::layout::Alignment::Left);
     f.render_widget(widget, area);
+
+    // Render vertical scrollbar if list exceeds visible height
+    if visual_items.len() > visible_height {
+        let scrollbar_col = area.x + area.width.saturating_sub(1);
+        app.ui_bounds.scrollbar_rect = Some(Rect::new(scrollbar_col, area.y, 1, area.height));
+
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_symbol("█")
+            .track_symbol(None)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .thumb_style(Style::default().fg(C_ACCENT2));
+        let mut scrollbar_state =
+            ScrollbarState::new(visual_items.len().saturating_sub(visible_height)).position(start);
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
 }
 
 // ─── Library View ──────────────────────────────────────────────────────────
@@ -683,6 +777,22 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
 
     let list = List::new(list_items);
     f.render_widget(list, area);
+
+    // Render vertical scrollbar if library exceeds visible height
+    if total_items > visible_height {
+        let scrollbar_col = area.x + area.width.saturating_sub(1);
+        app.ui_bounds.scrollbar_rect = Some(Rect::new(scrollbar_col, area.y, 1, area.height));
+
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_symbol("█")
+            .track_symbol(None)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .thumb_style(Style::default().fg(C_ACCENT2));
+        let mut scrollbar_state =
+            ScrollbarState::new(total_items.saturating_sub(visible_height)).position(start);
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
 }
 
 // ─── Search View ───────────────────────────────────────────────────────────
@@ -740,6 +850,28 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
 
     let list_widget = Paragraph::new(display_items).alignment(ratatui::layout::Alignment::Left);
     f.render_widget(list_widget, results_area);
+
+    // Render vertical scrollbar if search results exceed visible height
+    if app.search_results.len() > results_height {
+        let scrollbar_col = results_area.x + results_area.width.saturating_sub(1);
+        app.ui_bounds.scrollbar_rect = Some(Rect::new(
+            scrollbar_col,
+            results_area.y,
+            1,
+            results_area.height,
+        ));
+
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_symbol("█")
+            .track_symbol(None)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .thumb_style(Style::default().fg(C_ACCENT2));
+        let mut scrollbar_state =
+            ScrollbarState::new(app.search_results.len().saturating_sub(results_height))
+                .position(start);
+        f.render_stateful_widget(scrollbar, results_area, &mut scrollbar_state);
+    }
 }
 
 // ─── Help View ─────────────────────────────────────────────────────────────
@@ -948,6 +1080,39 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 Style::default().fg(C_FG),
             ),
         ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("b / B", Style::default().fg(C_CYAN)),
+            Span::styled("        •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Search playing artist on Google in browser",
+                Style::default().fg(C_FG),
+            ),
+        ]),
+        Line::from(""),
+        // Mouse Controls
+        Line::from(Span::styled(
+            "  ── Mouse Interaction ──",
+            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Left Click", Style::default().fg(C_CYAN)),
+            Span::styled("   •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Select item / Play (double-click) / Seek progress / Mini-controls / Search artist & song",
+                Style::default().fg(C_FG),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Scroll Wheel", Style::default().fg(C_CYAN)),
+            Span::styled(" •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Scroll Library, Queue, Search, or Lyrics smoothly",
+                Style::default().fg(C_FG),
+            ),
+        ]),
     ];
 
     let widget = Paragraph::new(help_text).alignment(ratatui::layout::Alignment::Left);
@@ -1010,7 +1175,8 @@ fn draw_dir_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 // ─── Footer Tab Bar ────────────────────────────────────────────────────────
-fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
+fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
+    app.ui_bounds.footer_tabs_rect = Some(area);
     let tabs = [
         ("F2", "Playlist", ActivePanel::Queue),
         ("F3", "Library", ActivePanel::Library),

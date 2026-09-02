@@ -17,8 +17,27 @@ async fn player_proxy() -> zbus::Result<zbus::Proxy<'static>> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mpris_methods_dispatch_commands() {
-    if let Err(err) = Connection::session().await {
-        eprintln!("skipping MPRIS DBus test: no usable session bus: {err}");
+    let conn = match Connection::session().await {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("skipping MPRIS DBus test: no usable session bus: {err}");
+            return;
+        }
+    };
+
+    let dbus = match DBusProxy::new(&conn).await {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    if dbus
+        .name_has_owner(MPRIS_BUS_NAME.try_into().expect("valid bus name"))
+        .await
+        .unwrap_or(false)
+    {
+        eprintln!(
+            "skipping MPRIS DBus test: bus name {MPRIS_BUS_NAME} already owned by running player"
+        );
         return;
     }
 

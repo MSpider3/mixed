@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 #[cfg(target_os = "linux")]
-fn get_cell_aspect_ratio() -> f32 {
+pub fn get_cell_aspect_ratio() -> f32 {
     unsafe {
         let mut ws = libc::winsize {
             ws_row: 0,
@@ -31,16 +31,12 @@ fn get_cell_aspect_ratio() -> f32 {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn get_cell_aspect_ratio() -> f32 {
+pub fn get_cell_aspect_ratio() -> f32 {
     2.0
 }
 
-/// Renders cover art using Sixel/Kitty protocol via ratatui-image, falling back to a text placeholder.
-pub fn render_artwork(
-    f: &mut Frame,
-    area: Rect,
-    protocol: &mut Option<ratatui_image::protocol::StatefulProtocol>,
-) {
+/// Computes the pixel-aspect-corrected square bounds for album art inside an area.
+pub fn compute_art_rect(area: Rect, align_top: bool) -> Rect {
     let aspect_ratio = get_cell_aspect_ratio();
 
     // Calculate largest square in pixel-space mapping to cell grid
@@ -54,11 +50,21 @@ pub fn render_artwork(
     let w = w.max(4).min(area.width);
     let h = h.max(4).min(area.height);
 
-    // Center the square within the original area
     let x_offset = area.x + (area.width - w) / 2;
-    let y_offset = area.y + (area.height - h) / 2;
-    let centered_area = Rect::new(x_offset, y_offset, w, h);
+    let y_offset = if align_top {
+        area.y
+    } else {
+        area.y + (area.height - h) / 2
+    };
+    Rect::new(x_offset, y_offset, w, h)
+}
 
+/// Renders cover art using Sixel/Kitty protocol via ratatui-image, falling back to a text placeholder.
+pub fn render_artwork(
+    f: &mut Frame,
+    centered_area: Rect,
+    protocol: &mut Option<ratatui_image::protocol::StatefulProtocol>,
+) {
     if let Some(ref mut prot) = protocol {
         if centered_area.width >= 4 && centered_area.height >= 4 {
             let widget = ratatui_image::StatefulImage::default();
