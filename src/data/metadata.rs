@@ -177,6 +177,9 @@ pub fn read_metadata(path: &Path) -> TrackMetadata {
     meta
 }
 
+/// Maximum allowed cover art size in bytes (10 MB) to prevent memory exhaustion
+const MAX_COVER_ART_BYTES: usize = 10 * 1024 * 1024;
+
 /// Reads ONLY the cover art bytes for a specific track path.
 /// Called lazily at play-time — never during library scanning.
 pub fn read_cover_art(path: &Path) -> Option<Vec<u8>> {
@@ -184,7 +187,7 @@ pub fn read_cover_art(path: &Path) -> Option<Vec<u8>> {
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     for pic in tag.pictures() {
         let data = pic.data();
-        if !data.is_empty() {
+        if !data.is_empty() && data.len() <= MAX_COVER_ART_BYTES {
             return Some(data.to_vec());
         }
     }

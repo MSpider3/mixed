@@ -3,19 +3,26 @@ use std::sync::OnceLock;
 
 static STRIP_TRACK_NUMBER: OnceLock<Regex> = OnceLock::new();
 
+/// Strips terminal control and escape characters to prevent OSC/ANSI sequence injection.
+pub fn sanitize_terminal_title(title: &str) -> String {
+    title.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// Replicates `kew`'s `format_filename` track number stripping and underscore replacement logic.
 pub fn sanitize_title(title: &str) -> String {
     // 1. Replace underscores with spaces
     let mut sanitized = title.replace('_', " ");
 
-    // 2. Strip extensions
-    for ext in &[
-        "mp3", "flac", "ogg", "opus", "wav", "m4a", "aac", "wma", "webm",
-    ] {
-        let suffix = format!(".{}", ext);
-        if sanitized.to_lowercase().ends_with(&suffix) {
-            sanitized = sanitized[..sanitized.len() - suffix.len()].to_string();
-            break;
+    // 2. Strip extensions safely on UTF-8 char boundaries
+    if let Some(dot_idx) = sanitized.rfind('.') {
+        let ext = &sanitized[dot_idx + 1..];
+        if [
+            "mp3", "flac", "ogg", "opus", "wav", "m4a", "aac", "wma", "webm",
+        ]
+        .iter()
+        .any(|&e| ext.eq_ignore_ascii_case(e))
+        {
+            sanitized.truncate(dot_idx);
         }
     }
 
@@ -49,6 +56,19 @@ mod tests {
         assert_eq!(
             sanitize_title("Track Without Number"),
             "Track Without Number"
+        );
+        assert_eq!(sanitize_title("İstanbul Track_01.MP3"), "İstanbul Track 01");
+    }
+
+    #[test]
+    fn test_sanitize_terminal_title() {
+        assert_eq!(
+            sanitize_terminal_title("Track\x1b]0;hacked\x07Name"),
+            "Track]0;hackedName"
+        );
+        assert_eq!(
+            sanitize_terminal_title("Normal Title - Artist"),
+            "Normal Title - Artist"
         );
     }
 }

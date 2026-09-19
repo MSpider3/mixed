@@ -259,7 +259,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MediaCommand::Previous => app.prev_track(),
                         MediaCommand::Seek(offset) => {
                             let current = app.player().map(|p| p.elapsed_ms()).unwrap_or(0);
-                            let target = (current as i64 + offset / 1000).max(0) as u64;
+                            let target = (current as i64)
+                                .saturating_add(offset / 1000)
+                                .max(0) as u64;
                             app.seek(target);
                         }
                         MediaCommand::SetPosition(pos) => {

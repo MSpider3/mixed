@@ -169,9 +169,13 @@ impl SymphoniaSource {
                     match self.decoder.decode(&packet) {
                         Ok(decoded) => {
                             let spec = *decoded.spec();
-                            // Update sample rate and channels if they differ from initial metadata
-                            self.sample_rate = spec.rate;
-                            self.channels = spec.channels.count() as u16;
+                            // Update sample rate and channels if non-zero to prevent divide-by-zero
+                            if spec.rate > 0 {
+                                self.sample_rate = spec.rate;
+                            }
+                            if spec.channels.count() > 0 {
+                                self.channels = spec.channels.count() as u16;
+                            }
 
                             if self.conv_buf.is_none()
                                 || self.conv_buf.as_ref().unwrap().capacity() < decoded.capacity()

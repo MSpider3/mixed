@@ -502,7 +502,11 @@ pub fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
                     // col 8: ⏭  (cols 6..9)
                     // col 12: +  (cols 10..13)
                     // col 16: -  (cols 14..17)
-                    // col 20: ∅  (cols 18+)
+                    // col 20: ∅  (cols 18..20)
+                    if x < indent || x >= indent + total_w {
+                        return;
+                    }
+
                     if x < indent + 2 {
                         app.prev_track();
                     } else if x < indent + 6 {

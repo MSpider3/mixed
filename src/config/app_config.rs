@@ -61,7 +61,15 @@ pub fn config_path() -> PathBuf {
         path.push("config.json");
         path
     } else {
-        PathBuf::from("/tmp/mixed_config.json")
+        let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
+        let fallback_dir = std::env::temp_dir().join(format!("mixed-{}", user));
+        let _ = fs::create_dir_all(&fallback_dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&fallback_dir, fs::Permissions::from_mode(0o700));
+        }
+        fallback_dir.join("config.json")
     }
 }
 

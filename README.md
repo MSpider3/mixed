@@ -89,10 +89,10 @@ Quickly explore artist discography, lyrics, or background information in your de
 You can download the pre-compiled binary for your system from the **[Releases](../../releases)** page.
 
 #### Linux (x86_64)
-1. Download `mixed-v1.5.1-x86_64-unknown-linux-gnu.tar.gz`.
+1. Download `mixed-v1.5.2-x86_64-unknown-linux-gnu.tar.gz`.
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v1.5.1-x86_64-unknown-linux-gnu.tar.gz
+   tar -xzf mixed-v1.5.2-x86_64-unknown-linux-gnu.tar.gz
    ```
 3. Move the `mixed` binary to your system PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -101,10 +101,10 @@ You can download the pre-compiled binary for your system from the **[Releases](.
 4. Run the player by typing `mixed` in your terminal.
 
 #### macOS (Apple Silicon or Intel)
-1. Download either `mixed-v1.5.1-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v1.5.1-x86_64-apple-darwin.tar.gz` (Intel).
+1. Download either `mixed-v1.5.2-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v1.5.2-x86_64-apple-darwin.tar.gz` (Intel).
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v1.5.1-*.tar.gz
+   tar -xzf mixed-v1.5.2-*.tar.gz
    ```
 3. Move `mixed` to a directory in your PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -116,7 +116,7 @@ You can download the pre-compiled binary for your system from the **[Releases](.
    ```
 
 #### Windows (x86_64)
-1. Download `mixed-v1.5.1-x86_64-pc-windows-msvc.zip`.
+1. Download `mixed-v1.5.2-x86_64-pc-windows-msvc.zip`.
 2. Extract the `.zip` file.
 3. Move `mixed.exe` to a folder of your choice and run it in a terminal emulator (Windows Terminal, PowerShell, or Command Prompt).
 

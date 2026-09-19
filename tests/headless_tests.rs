@@ -285,6 +285,51 @@ fn test_mouse_interaction_and_navigation() {
             modifiers: KeyModifiers::empty(),
         },
     );
+
+    // 6. Verify bounded mini-controls clicks (SEC-09)
+    app.playlist.add(
+        std::path::PathBuf::from("/mock/song.mp3"),
+        mixed::data::metadata::TrackMetadata::default(),
+    );
+    assert_eq!(app.playlist.len(), 1);
+
+    // Clicking in blank padding space to the right of mini-controls must NOT clear playlist
+    let blank_space_click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: indent + total_w + 2,
+        row: mini_rect.y,
+        modifiers: KeyModifiers::empty(),
+    };
+    events::handle_mouse(&mut app, blank_space_click);
+    assert_eq!(
+        app.playlist.len(),
+        1,
+        "Clicking blank space to the right must not clear playlist"
+    );
+
+    // Clicking to the left of mini-controls must be ignored
+    let left_space_click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: indent.saturating_sub(1),
+        row: mini_rect.y,
+        modifiers: KeyModifiers::empty(),
+    };
+    events::handle_mouse(&mut app, left_space_click);
+    assert_eq!(app.playlist.len(), 1);
+
+    // Clicking directly on the clear playlist button (indent + 19) clears playlist
+    let clear_click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: indent + 19,
+        row: mini_rect.y,
+        modifiers: KeyModifiers::empty(),
+    };
+    events::handle_mouse(&mut app, clear_click);
+    assert_eq!(
+        app.playlist.len(),
+        0,
+        "Clicking clear button directly should clear playlist"
+    );
 }
 
 #[test]

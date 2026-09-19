@@ -5,6 +5,31 @@ All notable changes to the **mixed** music player will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-09-19
+
+### Security & Hardening
+- **Windows Command Injection & Shell Metacharacter Protection (SEC-01)**:
+  - Replaced shell execution (`cmd /c start`) in browser search invocations with direct OS handler (`rundll32 url.dll,FileProtocolHandler`), and added URL protocol validation (`http://`/`https://` only) to eliminate command execution risks from crafted song titles.
+- **Terminal Title ANSI/OSC Escape Injection Sanitization (SEC-02)**:
+  - Added `sanitize_terminal_title` stripping all ASCII and C1 control characters (`< 0x20`, `\x7f`, `\x1b`, `\x07`, `\x9b`) from track metadata before writing terminal window title sequences.
+- **Secure Isolated Temporary Directory Fallback (SEC-03)**:
+  - Replaced static shared `/tmp/mixed_cover_...` and `/tmp/mixed_config.json` fallbacks with user-isolated, private subdirectories (`mode 0o700` on Unix), eliminating symlink overwrite vulnerabilities in multi-user environments.
+- **Cover Art Filename Hashing & Filesystem Boundary Protection (SEC-04)**:
+  - Replaced raw title-based cover art filenames with 64-bit hexadecimal hashes (`mixed_cover_<hash>.png`), avoiding `NAME_MAX` (255 byte) filesystem exhaustion on long track names.
+- **Image Decompression Bomb & Memory Exhaustion Safeguards (SEC-05)**:
+  - Enforced a 10 MB buffer cap on embedded cover art reads in `read_cover_art()`.
+  - Configured strict decode limits ($4096 \times 4096$ maximum width and height) on `ImageReader` to prevent decompression bombs from consuming gigabytes of heap memory.
+- **Dynamic Audio Decoder Zero-Rate / Zero-Channel Protection (SEC-06)**:
+  - Added non-zero guards for dynamic sample rate (`spec.rate > 0`) and channel count (`spec.channels.count() > 0`) updates during Symphonia frame decoding to prevent divide-by-zero panics in the Rodio mixer thread.
+- **Integer Overflow Defense in MPRIS Seek Conversion (SEC-07)**:
+  - Used `saturating_add` when converting microsecond seek offsets to milliseconds in D-Bus/MPRIS commands.
+- **Unicode-Safe Extension Stripping (SEC-08)**:
+  - Refactored file extension stripping to locate dot boundaries directly on UTF-8 character boundaries and compare case-insensitively without length mismatch or mid-codepoint slicing panics.
+- **Mini-Controls Click Bounding & Playlist Protection (SEC-09)**:
+  - Added strict horizontal boundary validation to mini-controls mouse click handling, preventing clicks in adjacent padding whitespace from accidentally triggering playlist clearing.
+
+---
+
 ## [1.5.1] - 2026-09-19
 
 ### Fixed

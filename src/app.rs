@@ -568,15 +568,42 @@ impl App {
 
         if let Some(path) = track_path {
             if let Some(cover_bytes) = metadata::read_cover_art(&path) {
-                if let Ok(dyn_img) = image::load_from_memory(&cover_bytes) {
+                let reader = image::ImageReader::new(std::io::Cursor::new(&cover_bytes));
+                let dyn_img = reader.with_guessed_format().ok().and_then(|mut r| {
+                    let mut limits = image::Limits::default();
+                    limits.max_image_width = Some(4096);
+                    limits.max_image_height = Some(4096);
+                    r.limits(limits);
+                    r.decode().ok()
+                });
+
+                if let Some(dyn_img) = dyn_img {
                     // Resolve XDG/platform cache directory for cover art files
                     let cache_dir = directories::ProjectDirs::from("", "", "mixed")
                         .map(|p| p.cache_dir().to_path_buf())
-                        .unwrap_or_else(std::env::temp_dir);
+                        .unwrap_or_else(|| {
+                            let user =
+                                std::env::var("USER").unwrap_or_else(|_| "default".to_string());
+                            let dir = std::env::temp_dir().join(format!("mixed-{}", user));
+                            let _ = std::fs::create_dir_all(&dir);
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(
+                                    &dir,
+                                    std::fs::Permissions::from_mode(0o700),
+                                );
+                            }
+                            dir
+                        });
                     let _ = std::fs::create_dir_all(&cache_dir);
 
-                    let safe_title = title_key.replace([' ', '/', '\\', ':', '.'], "_");
-                    let tmp_path = cache_dir.join(format!("mixed_cover_{}.png", safe_title));
+                    use std::hash::{DefaultHasher, Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    path.hash(&mut hasher);
+                    title_key.hash(&mut hasher);
+                    let cover_hash = hasher.finish();
+                    let tmp_path = cache_dir.join(format!("mixed_cover_{:016x}.png", cover_hash));
 
                     // Save BEFORE moving dyn_img into the protocol (move drops pixel buffer)
                     if dyn_img.save(&tmp_path).is_ok() {
@@ -642,7 +669,9 @@ impl App {
                                 meta.display_artist(),
                                 meta.display_title(self.config.strip_track_numbers)
                             );
-                            print!("\x1b]0;{}\x07", title);
+                            let safe_title =
+                                crate::utils::sanitizer::sanitize_terminal_title(&title);
+                            print!("\x1b]0;{}\x07", safe_title);
                             let _ = std::io::Write::flush(&mut std::io::stdout());
                         }
 
@@ -1489,6 +1518,9 @@ fn url_encode(s: &str) -> String {
 
 /// Open a URL in the user's default browser on a detached thread without blocking TUI or bleeding output.
 fn open_browser_url(url: String) {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return;
+    }
     std::thread::spawn(move || {
         #[cfg(target_os = "linux")]
         {
@@ -1510,8 +1542,8 @@ fn open_browser_url(url: String) {
         }
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("cmd")
-                .args(["/c", "start", &url])
+            let _ = std::process::Command::new("rundll32")
+                .args(["url.dll,FileProtocolHandler", &url])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
