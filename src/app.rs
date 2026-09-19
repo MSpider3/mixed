@@ -243,18 +243,30 @@ impl App {
     }
 
     pub fn display_elapsed_ms(&self) -> u64 {
-        if let Some(seek) = self.pending_seek {
+        let elapsed = if let Some(seek) = self.pending_seek {
             seek.as_millis() as u64
         } else {
             self.player().map(|p| p.elapsed_ms()).unwrap_or(0)
+        };
+        let duration = self.player().map(|p| p.duration_ms()).unwrap_or(0);
+        if duration > 0 {
+            elapsed.min(duration)
+        } else {
+            elapsed
         }
     }
 
     pub fn display_elapsed_secs(&self) -> f64 {
-        if let Some(seek) = self.pending_seek {
+        let elapsed = if let Some(seek) = self.pending_seek {
             seek.as_secs_f64()
         } else {
             self.player().map(|p| p.elapsed_secs()).unwrap_or(0.0)
+        };
+        let duration = self.player().map(|p| p.duration_ms()).unwrap_or(0);
+        if duration > 0 {
+            elapsed.min(duration as f64 / 1000.0)
+        } else {
+            elapsed
         }
     }
 
@@ -479,12 +491,24 @@ impl App {
                     };
 
                     if load_ok {
+                        self.stopped = false;
                         self.set_now_playing_meta();
                         self.load_lyrics_for_current();
                         self.generate_cover_art_protocol();
                         if let Some(player) = self.player.as_mut() {
                             if !state.was_playing {
                                 player.pause(); // restore paused state
+                            }
+                        }
+                        // Set duration from metadata if rodio didn't report it
+                        let duration = self.player.as_ref().map(|p| p.duration_ms()).unwrap_or(0);
+                        if duration == 0 {
+                            if let Some(ref meta) = self.now_playing_meta {
+                                if let Some(dur) = meta.duration {
+                                    if let Some(player) = self.player.as_mut() {
+                                        player.set_duration_ms(dur.as_millis() as u64);
+                                    }
+                                }
                             }
                         }
                         self.push_mpris_metadata();
@@ -551,7 +575,7 @@ impl App {
                         .unwrap_or_else(std::env::temp_dir);
                     let _ = std::fs::create_dir_all(&cache_dir);
 
-                    let safe_title = title_key.replace([' ', '/'], "_");
+                    let safe_title = title_key.replace([' ', '/', '\\', ':', '.'], "_");
                     let tmp_path = cache_dir.join(format!("mixed_cover_{}.png", safe_title));
 
                     // Save BEFORE moving dyn_img into the protocol (move drops pixel buffer)
@@ -580,6 +604,7 @@ impl App {
 
     pub fn play_current(&mut self) {
         self.stopped = false;
+        self.lyrics_scroll = 0;
         self.pending_seek = None;
         self.last_seek_input = None;
         self.last_lyric_line = None;
@@ -668,6 +693,7 @@ impl App {
 
     pub fn stop(&mut self) {
         self.stopped = true;
+        self.lyrics_scroll = 0;
         if let Some(p) = self.player.as_mut() {
             p.stop()
         };
@@ -721,7 +747,11 @@ impl App {
 
     pub fn toggle_pause(&mut self) {
         if let Some(p) = self.player.as_mut() {
-            p.toggle_pause()
+            let was_paused = p.is_paused();
+            p.toggle_pause();
+            if was_paused {
+                self.stopped = false;
+            }
         };
         self.push_mpris_playback();
         self.refresh_needed = true;

@@ -1,4 +1,5 @@
 use lofty::{
+    config::ParseOptions,
     file::{AudioFile, TaggedFileExt},
     probe::Probe,
     tag::{Accessor, ItemKey},
@@ -116,7 +117,10 @@ pub fn read_metadata(path: &Path) -> TrackMetadata {
         ..TrackMetadata::default()
     };
 
-    let tagged = match Probe::open(path).and_then(|p| p.read()) {
+    let tagged = match Probe::open(path)
+        .map(|p| p.options(ParseOptions::new().read_cover_art(false)))
+        .and_then(|p| p.read())
+    {
         Ok(t) => t,
         Err(_) => {
             if let Some(ref title) = meta.title {
@@ -214,14 +218,48 @@ pub fn parse_timestamp(ts: &str) -> Option<f64> {
         2 => {
             let mins: f64 = parts[0].trim().parse().ok()?;
             let secs: f64 = parts[1].trim().parse().ok()?;
-            Some(mins * 60.0 + secs)
+            let t = mins * 60.0 + secs;
+            if t.is_finite() && t >= 0.0 {
+                Some(t)
+            } else {
+                None
+            }
         }
         3 => {
             let hours: f64 = parts[0].trim().parse().ok()?;
             let mins: f64 = parts[1].trim().parse().ok()?;
             let secs: f64 = parts[2].trim().parse().ok()?;
-            Some(hours * 3600.0 + mins * 60.0 + secs)
+            let t = hours * 3600.0 + mins * 60.0 + secs;
+            if t.is_finite() && t >= 0.0 {
+                Some(t)
+            } else {
+                None
+            }
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_timestamp_valid() {
+        assert_eq!(parse_timestamp("01:23.45"), Some(83.45));
+        assert_eq!(parse_timestamp("00:05"), Some(5.0));
+        assert_eq!(parse_timestamp("01:02:03"), Some(3723.0));
+        assert_eq!(parse_timestamp("01:23.45,450"), Some(83.45));
+    }
+
+    #[test]
+    fn test_parse_timestamp_nan_and_inf_rejected() {
+        assert_eq!(parse_timestamp("nan:nan"), None);
+        assert_eq!(parse_timestamp("NaN:00"), None);
+        assert_eq!(parse_timestamp("+nan:10"), None);
+        assert_eq!(parse_timestamp("-nan:10"), None);
+        assert_eq!(parse_timestamp("inf:00"), None);
+        assert_eq!(parse_timestamp("-inf:00"), None);
+        assert_eq!(parse_timestamp("-01:00"), None);
     }
 }

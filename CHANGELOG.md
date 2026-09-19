@@ -5,6 +5,34 @@ All notable changes to the **mixed** music player will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-09-19
+
+### Fixed
+- **Session Restore Playback State & Auto-Advance**:
+  - Fixed an issue where restoring the last played track left the player in a stopped state (`self.stopped = false` was not cleared), preventing auto-advancing to the next song upon track completion.
+  - Clamped displayed elapsed playback time in the progress bar and Rodio audio backend to the total track duration, preventing the elapsed timer from continuing to increment past track end.
+  - Populated fallback track duration from metadata when the audio stream does not report container length.
+- **Full Lyrics Scrolling & Panic Prevention**:
+  - Fixed an out-of-bounds slice range panic (`start > end`) in `render_untimed_lyrics()` and `render_full_timed_lyrics()` when scrolling past the available lyric lines.
+  - Clamped keyboard and mouse scroll actions against total lyric lines to keep lyrics visible on screen without scrolling into blank void space.
+  - Automatically reset lyrics scroll offset to top when switching tracks or stopping playback.
+
+### Security
+- **Cover Art Path Traversal Elimination**:
+  - Sanitized backslashes (`\`), forward slashes (`/`), colons (`:`), and dots (`.`) in song title keys used for cover art cache file generation, preventing potential path traversal outside the cache directory on Windows.
+- **Timestamp Parsing DoS Mitigation**:
+  - Hardened timestamp parser to strictly validate finite and non-negative values (`t.is_finite() && t >= 0.0`), rejecting `NaN`, `-NaN`, `inf`, and `-inf` inputs that could cause panics in sorting or arithmetic operations.
+- **Memory Amplification Protection on LRC Parsing**:
+  - Enforced bounds on lyrics files: maximum file size of 256 KiB (`MAX_LRC_FILE_BYTES`), maximum 32 timestamps per line (`MAX_TIMESTAMPS_PER_LINE`), and maximum 20,000 lyric lines (`MAX_TOTAL_LYRIC_LINES`).
+  - Switched lyric sorting to `total_cmp()` for robust IEEE 754 float comparison.
+- **Audio Decoder Zero-Division & Seek Assertions**:
+  - Added non-zero validation for sample rate and channel count when opening streams in `SymphoniaSource` to prevent zero division in `TimeBase::new`.
+  - Clamped seek target durations and restricted seek `Time.frac` strictly to `[0.0, 1.0)` to eliminate assertion panics in Symphonia time conversions.
+- **Library Scanning Memory Optimization**:
+  - Configured metadata reader options (`read_cover_art(false)`) during directory scanning, significantly reducing RAM usage during large music library scans.
+
+---
+
 ## [1.5.0] - 2026-09-03
 
 ### Added

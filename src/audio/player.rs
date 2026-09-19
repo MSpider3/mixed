@@ -181,6 +181,10 @@ impl Player {
                 is_finished_clone.store(finished, Ordering::Release);
                 if finished {
                     is_playing_clone.store(false, Ordering::Release);
+                    let total = total_duration_ms_clone.load(Ordering::Relaxed);
+                    if total > 0 {
+                        elapsed_ms_clone.store(total, Ordering::Relaxed);
+                    }
                 }
 
                 // Update volume atomic to match backend volume

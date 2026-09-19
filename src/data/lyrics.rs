@@ -2,6 +2,11 @@ use std::path::Path;
 
 use crate::data::metadata::{parse_timestamp, LrcLine};
 
+/// Upper bounds for untrusted .lrc content to prevent unbounded memory amplification (CWE-400).
+pub const MAX_LRC_FILE_BYTES: u64 = 256 * 1024;
+pub const MAX_TIMESTAMPS_PER_LINE: usize = 32;
+pub const MAX_TOTAL_LYRIC_LINES: usize = 20_000;
+
 /// Word-level timestamp for Enhanced LRC.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WordTimestamp {
@@ -57,6 +62,14 @@ pub fn load_lyrics_from_lrc(audio_path: &Path) -> Option<LyricsData> {
         return None;
     }
 
+    if std::fs::metadata(&lrc_path)
+        .map(|m| m.len())
+        .unwrap_or(u64::MAX)
+        > MAX_LRC_FILE_BYTES
+    {
+        return None;
+    }
+
     let content = std::fs::read_to_string(&lrc_path).ok()?;
     parse_lrc_content(&content)
 }
@@ -109,7 +122,9 @@ pub fn parse_lrc_content(content: &str) -> Option<LyricsData> {
             if let Some(close_bracket) = rem.find(']') {
                 let tag = rem[1..close_bracket].trim();
                 if let Some(ts) = parse_timestamp(tag) {
-                    timestamps.push(ts);
+                    if timestamps.len() < MAX_TIMESTAMPS_PER_LINE {
+                        timestamps.push(ts);
+                    }
                     rem = rem[close_bracket + 1..].trim_start();
                 } else {
                     break;
@@ -131,6 +146,9 @@ pub fn parse_lrc_content(content: &str) -> Option<LyricsData> {
         }
 
         for ts in timestamps {
+            if lines.len() >= MAX_TOTAL_LYRIC_LINES {
+                break;
+            }
             lines.push(LrcLine {
                 time_secs: ts,
                 text: clean_text.clone(),
@@ -145,11 +163,7 @@ pub fn parse_lrc_content(content: &str) -> Option<LyricsData> {
 
     // Ensure sorted chronologically by time
     let mut combined: Vec<_> = lines.into_iter().zip(word_timestamps).collect();
-    combined.sort_by(|a, b| {
-        a.0.time_secs
-            .partial_cmp(&b.0.time_secs)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    combined.sort_by(|a, b| a.0.time_secs.total_cmp(&b.0.time_secs));
 
     let (sorted_lines, sorted_words): (Vec<_>, Vec<_>) = combined.into_iter().unzip();
 
@@ -374,5 +388,26 @@ mod tests {
         let data = parse_lrc_content(lrc).expect("Should parse plain line");
         assert_eq!(data.lines[0].text, "Simple line (Guitar Solo) [Chorus]");
         assert!(!data.has_word_timestamps());
+    }
+
+    #[test]
+    fn test_nan_timestamps_do_not_crash_parser() {
+        let lrc = "[nan:nan]corrupt line\n[00:02.00]valid line";
+        let data = parse_lrc_content(lrc).expect("Should parse valid lines");
+        assert_eq!(data.lines.len(), 1);
+        assert_eq!(data.lines[0].text, "valid line");
+        assert_eq!(data.lines[0].time_secs, 2.0);
+    }
+
+    #[test]
+    fn test_timestamps_per_line_capped() {
+        // Create 50 timestamps on a single line
+        let mut lrc = String::new();
+        for i in 0..50 {
+            lrc.push_str(&format!("[00:{:02}.00]", i));
+        }
+        lrc.push_str("Multi-timestamp text");
+        let data = parse_lrc_content(&lrc).expect("Should parse with cap");
+        assert_eq!(data.lines.len(), MAX_TIMESTAMPS_PER_LINE);
     }
 }

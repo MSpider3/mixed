@@ -109,7 +109,7 @@ pub fn render_full_timed_lyrics(
 
     let width = area.width as usize;
     let active_idx = lyrics.find_active_line(elapsed_secs);
-    let start = scroll as usize;
+    let start = (scroll as usize).min(lyrics.lines.len());
     let end = (start + area.height as usize).min(lyrics.lines.len());
     let mut display_lines = Vec::with_capacity(area.height as usize);
 
@@ -187,16 +187,18 @@ pub fn render_untimed_lyrics(f: &mut Frame, area: Rect, lines: &[String], scroll
     }
 
     let width = area.width as usize;
-    let start = scroll as usize;
+    let start = (scroll as usize).min(lines.len());
     let end = (start + area.height as usize).min(lines.len());
     let mut display = Vec::with_capacity(area.height as usize);
 
-    for line in &lines[start..end] {
-        let padded = center_pad(line.trim(), width);
-        display.push(Line::from(Span::styled(
-            padded,
-            Style::default().fg(Color::Reset),
-        )));
+    if start < end {
+        for line in &lines[start..end] {
+            let padded = center_pad(line.trim(), width);
+            display.push(Line::from(Span::styled(
+                padded,
+                Style::default().fg(Color::Reset),
+            )));
+        }
     }
 
     while display.len() < area.height as usize {
@@ -205,4 +207,56 @@ pub fn render_untimed_lyrics(f: &mut Frame, area: Rect, lines: &[String], scroll
 
     let widget = Paragraph::new(display);
     f.render_widget(widget, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn test_render_untimed_lyrics_extreme_scroll_no_panic() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let lines = vec![
+            "Line 1".to_string(),
+            "Line 2".to_string(),
+            "Line 3".to_string(),
+        ];
+        for scroll in [0, 1, 2, 3, 4, 100, u16::MAX] {
+            terminal
+                .draw(|f| {
+                    render_untimed_lyrics(f, f.area(), &lines, scroll);
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_render_full_timed_lyrics_extreme_scroll_no_panic() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let lyrics = LyricsData {
+            lines: vec![
+                crate::data::metadata::LrcLine {
+                    time_secs: 1.0,
+                    text: "L1".to_string(),
+                },
+                crate::data::metadata::LrcLine {
+                    time_secs: 2.0,
+                    text: "L2".to_string(),
+                },
+            ],
+            is_timed: true,
+            word_timestamps: vec![],
+        };
+        for scroll in [0, 1, 2, 3, 4, 100, u16::MAX] {
+            terminal
+                .draw(|f| {
+                    render_full_timed_lyrics(f, f.area(), &lyrics, 1.5, scroll);
+                })
+                .unwrap();
+        }
+    }
 }

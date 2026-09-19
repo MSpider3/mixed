@@ -108,11 +108,16 @@ impl SymphoniaSource {
             .clone();
 
         let track_id = track.id;
-        let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+        let sample_rate = track
+            .codec_params
+            .sample_rate
+            .filter(|&r| r > 0)
+            .unwrap_or(44100);
         let channels = track
             .codec_params
             .channels
             .map(|c| c.count() as u16)
+            .filter(|&c| c > 0)
             .unwrap_or(2);
 
         let time_base = track.codec_params.time_base;
@@ -241,7 +246,17 @@ impl Source for SymphoniaSource {
     }
 
     fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
-        let time = Time::from(pos.as_secs_f64());
+        let target = if let Some(total) = self.total_duration {
+            pos.min(total)
+        } else {
+            pos
+        };
+        let secs = target.as_secs();
+        let frac = (target.subsec_nanos() as f64 / 1_000_000_000.0).min(0.999_999_999);
+        let time = Time {
+            seconds: secs,
+            frac,
+        };
         let seek_to = SeekTo::Time {
             time,
             track_id: Some(self.track_id),

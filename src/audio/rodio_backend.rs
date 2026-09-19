@@ -123,6 +123,11 @@ impl RodioBackend {
     }
 
     pub fn seek_to(&mut self, target: Duration) {
+        let target = if let Some(total) = self.total_duration {
+            target.min(total)
+        } else {
+            target
+        };
         let pos_ms = target.as_millis() as u64;
         let duration = Duration::from_millis(pos_ms);
         match self.sink.try_seek(duration) {
@@ -220,6 +225,11 @@ impl RodioBackend {
     }
 
     pub fn get_position(&mut self) -> Duration {
+        if self.is_finished() {
+            if let Some(total) = self.total_duration {
+                return total;
+            }
+        }
         let running = if let Some(start) = &self.start_instant {
             if !self.is_paused {
                 start.elapsed().as_millis() as u64
@@ -229,7 +239,12 @@ impl RodioBackend {
         } else {
             0
         };
-        Duration::from_millis(self.accumulated_ms + running)
+        let current = Duration::from_millis(self.accumulated_ms + running);
+        if let Some(total) = self.total_duration {
+            current.min(total)
+        } else {
+            current
+        }
     }
 
     pub fn get_duration(&mut self) -> Option<Duration> {

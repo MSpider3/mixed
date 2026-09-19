@@ -318,7 +318,23 @@ fn scroll_down(app: &mut App) {
             }
         }
         ActivePanel::NowPlaying if app.show_full_lyrics => {
-            app.lyrics_scroll += 1;
+            let total_lines = app
+                .current_lyrics
+                .as_ref()
+                .map(|l| l.lines.len())
+                .or_else(|| {
+                    app.playlist
+                        .current_entry()
+                        .and_then(|e| match &e.metadata.lyrics {
+                            crate::data::metadata::LyricsKind::Timed(lines) => Some(lines.len()),
+                            crate::data::metadata::LyricsKind::Untimed(lines) => Some(lines.len()),
+                            crate::data::metadata::LyricsKind::None => None,
+                        })
+                })
+                .unwrap_or(0);
+            if (app.lyrics_scroll as usize) + 1 < total_lines {
+                app.lyrics_scroll += 1;
+            }
         }
         _ => {}
     }
