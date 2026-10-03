@@ -78,11 +78,22 @@ Quickly explore artist discography, lyrics, or background information in your de
 - In the **Track (F4)** view, click directly on the **song title** to search for the song, or click the **artist name** to search for the artist.
 - All browser subcommands run with isolated `stdio` redirected to `/dev/null`, preventing any external browser warnings or logs from corrupting the TUI.
 
+### 🌐 Multi-Source Streaming (Spotify, YouTube Music & Local)
+Seamlessly search, browse, enqueue, and play music across multiple sources in one unified player:
+- **Local Library (`Ctrl+1` / `Alt+1`)**: Zero-dependency offline audio playback for FLAC, MP3, WAV, and OGG files with embedded metadata and synchronized lyrics.
+- **Spotify (`Ctrl+2` / `Alt+2`)**: Search and library navigation with raw PCM playback powered by `librespot` (requires Spotify Premium).
+- **YouTube Music (`Ctrl+3` / `Alt+3`)**: Search and browse YouTube Music tracks with background audio caching and 50% sequential prefetch via `yt-dlp`. Playback starts while the track is still downloading.
+- **Unified Queue (`Ctrl+4` / `Alt+4`)**: Mix tracks from local files, Spotify, and YouTube in a single queue with automatic cross-source advancing.
+
 ---
 
-## Installation
+## Installation & Runtime Requirements
 
-> **Note:** `mixed` is distributed as a **standalone, self-contained binary** with all audio decoders, TUI components, and metadata parsers statically compiled in. It requires **no prior installation or runtime libraries** (except standard ALSA libraries on minimal headless Linux distributions).
+> **Runtime Requirements:**
+> - **Local Playback**: Fully standalone and self-contained binary with all decoders statically compiled in. Zero external runtime dependencies.
+> - **YouTube Music Streaming**: Requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) installed and available in your system `$PATH`.
+> - **Spotify Streaming**: Requires **Spotify Premium** and personal Spotify Developer Client ID (PKCE authorization code flow, no secret required) configured in `~/.config/mixed/credentials.json` or `mixed.toml`.
+> - **Shortcut Fallback**: If your terminal emulator intercepts `Ctrl+1..4`, use `Alt+1..4` instead.
 
 ### Method 1: Pre-compiled Binaries (Recommended)
 
@@ -171,9 +182,14 @@ mixed --play /path/to/song.flac
 | Keybind | Action | Context |
 |---|---|---|
 | `F2 - F6` | Switch views (Queue/Library/Now Playing/Search/Help) | Navigation |
+| `Ctrl+1` / `Alt+1` | Switch to Local Library Source | Sources |
+| `Ctrl+2` / `Alt+2` | Switch to Spotify Source (requires Premium) | Sources |
+| `Ctrl+3` / `Alt+3` | Switch to YouTube Music Source (streams via yt-dlp) | Sources |
+| `Ctrl+4` / `Alt+4` | Switch to Unified Queue & Search | Sources |
 | `Tab` / `Shift+Tab` | Cycle active panel / view | Navigation |
 | `k` / `j` / `↑` / `↓` | Scroll / Navigate list items | Navigation |
-| `q` / `Esc` | Quit / Graceful Exit | System |
+| `q` / `Ctrl+C` | Quit / Graceful Exit | System |
+| `Esc` | Back to the queue view | Navigation |
 | `Space` / `p` | Play / Pause toggle | Playback |
 | `S` | Stop playback | Playback |
 | `n` / `l` / `→` | Next track | Playback |
@@ -185,6 +201,7 @@ mixed --play /path/to/song.flac
 | `r` | Cycle repeat mode (off → track → queue) | Playback |
 | `Enter` | Enqueue selected item / Play selected queue item | Queue / Library |
 | `Alt + Enter` | Enqueue selected item and play immediately | Queue / Library |
+| `Shift + Enter` | Enqueue selected item to play next | Queue / Library |
 | `o` / `←` / `→` | Toggle / Collapse/Expand directory tree | Library |
 | `Delete` | Remove selected track from the queue | Queue |
 | `Backspace` | Clear the entire queue (stops playback) | Queue |

@@ -7,9 +7,7 @@ use ratatui::{
 };
 
 use crate::data::lyrics::{LyricsData, WordTimestamp};
-
-const C_ACTIVE: Color = Color::LightMagenta;
-const C_INACTIVE: Color = Color::DarkGray;
+use crate::ui::theme::{C_ACTIVE, C_INACTIVE};
 
 /// Centers a single-span text within a given width, padding left and right with spaces.
 /// This ensures every cell across the width is explicitly drawn, eliminating ghosting/bleeding.

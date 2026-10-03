@@ -22,10 +22,30 @@ pub struct AppConfig {
     /// Whether desktop notifications are enabled on song change.
     #[serde(default = "default_true")]
     pub desktop_notifications: bool,
+    /// Spotify Personal Client ID (if configured).
+    #[serde(default)]
+    pub spotify_client_id: Option<String>,
+    /// Custom path to yt-dlp binary (if not on PATH).
+    #[serde(default)]
+    pub yt_dlp_path: Option<String>,
+    /// Maximum size of the YouTube audio cache in MB (default 512).
+    #[serde(default = "default_yt_cache_mb")]
+    pub yt_cache_mb: usize,
+    /// Preferred YouTube audio quality format (default "bestaudio").
+    #[serde(default = "default_yt_audio_quality")]
+    pub yt_audio_quality: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_yt_cache_mb() -> usize {
+    512
+}
+
+fn default_yt_audio_quality() -> String {
+    "bestaudio".to_string()
 }
 
 impl Default for AppConfig {
@@ -39,6 +59,10 @@ impl Default for AppConfig {
             color_scheme: 0,
             strip_track_numbers: true,
             desktop_notifications: true,
+            spotify_client_id: None,
+            yt_dlp_path: None,
+            yt_cache_mb: 512,
+            yt_audio_quality: "bestaudio".to_string(),
         }
     }
 }

@@ -6,31 +6,31 @@
 
 ## Thread Model
 
-`mixed` runs four concurrent execution contexts that communicate exclusively through lock-free atomic state and bounded crossbeam channels. There are zero shared mutexes on any performance-critical path.
+`mixed` runs five concurrent execution contexts that communicate exclusively through lock-free atomic state and bounded crossbeam channels. There are zero shared mutexes on any performance-critical path.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         MAIN PROCESS                                │
-│                                                                     │
-│  ┌──────────────┐   ┌──────────────┐   ┌─────────────────────────┐ │
-│  │  Thread 1:   │   │  Thread 2:   │   │  Thread 3:              │ │
-│  │  TUI Render  │   │  Audio       │   │  FFT Visualizer         │ │
-│  │  Loop        │   │  Playback    │   │                         │ │
-│  │              │   │              │   │  34ms cadence            │ │
-│  │  select! {   │   │  Rodio Sink  │   │  VisualizerEngine       │ │
-│  │    event_rx  │◄──│  Decoder     │──►│  SampleRingBuffer       │ │
-│  │    tick_rx   │   │  Priority -10│   │  bounded(1) wake-up     │ │
-│  │    vis_wake  │   │              │   │                         │ │
-│  │    media_cmd │   └──────────────┘   └─────────────────────────┘ │
-│  │    lib_rx    │                                                   │
-│  │    player_rx │   ┌──────────────────────────────────────────┐   │
-│  │  }           │   │  Thread 4: Platform Media Integration    │   │
-│  │              │◄──│                                          │   │
-│  │  layout::    │   │  Linux:   Tokio async D-Bus/MPRIS        │   │
-│  │    draw()    │   │  Android: UDS listener (mixed.sock)      │   │
-│  └──────────────┘   └──────────────────────────────────────────┘   │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                            MAIN PROCESS                                │
+│                                                                        │
+│  ┌──────────────┐   ┌──────────────┐   ┌────────────────────────────┐  │
+│  │  Thread 1:   │   │  Thread 2:   │   │  Thread 3:                 │  │
+│  │  TUI Render  │   │  Audio       │   │  FFT Visualizer            │  │
+│  │  Loop        │   │  Playback    │   │                            │  │
+│  │              │   │              │   │  34ms cadence               │  │
+│  │  select! {   │   │  Rodio Sink  │   │  VisualizerEngine          │  │
+│  │    event_rx  │◄──│  Decoder     │──►│  SampleRingBuffer          │  │
+│  │    tick_rx   │   │  PcmSource   │   │  bounded(1) wake-up        │  │
+│  │    vis_wake  │   │  Priority -10│   │                            │  │
+│  │    source_rx │   └──────────────┘   └────────────────────────────┘  │
+│  │    media_cmd │                                                      │
+│  │    lib_rx    │   ┌────────────────────────┐  ┌───────────────────┐  │
+│  │    player_rx │   │ Thread 4: MPRIS D-Bus  │  │ Thread 5: Async   │  │
+│  │  }           │◄──│ Tokio async D-Bus      │  │ Network Runtime   │  │
+│  │              │   │ org.mpris.MediaPlayer2 │  │ Spotify / YouTube │  │
+│  │  layout::    │   └────────────────────────┘  └───────────────────┘  │
+│  │    draw()    │◄─────────────────────────────────────────┘           │
+│  └──────────────┘                                                      │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -147,25 +147,25 @@ All D-Bus method calls (`Play`, `Pause`, `Next`, `Seek`) are **thin routers**: t
 
 **Graceful shutdown:** The main thread sets `shutdown.store(true)` and drops the `mpsc` sender. The Tokio select loop detects either condition and exits, dropping the `Connection` which releases the D-Bus name immediately.
 
-### Android: Termux UDS Bridge (`sys/android_media.rs`)
+---
 
-A `std::thread::spawn` that:
+## Thread 5: Async Network Runtime (`sources/runtime.rs`)
 
-1. Cleans up any stale `$PREFIX/tmp/mixed.sock` from previous crashes.
-2. Binds a `UnixListener` in non-blocking mode.
-3. Polls for connections every 50ms, checking the `shutdown` `AtomicBool` on each iteration.
-4. Reads newline-delimited commands (`playpause`, `next`, `prev`, `quit`) from each client connection.
-5. Maps commands to `MediaCommand` variants and sends them on the shared crossbeam channel.
+A dedicated multi-threaded **Tokio** runtime that handles all asynchronous network I/O, Web API requests, and external streaming processes without ever blocking the TUI event loop or audio playback thread.
 
-**Notification integration:** The `AndroidMediaHandle::push_metadata()` method spawns a detached `termux-notification` process with `--type media` and button actions that `echo` commands into the socket file:
+**Communication flow:**
+- **Requests (`app` → `runtime`):** Dispatched via `crossbeam_channel::unbounded<SourceRequest>()`. Includes search queries, browse requests, login/auth tasks, and track resolution.
+- **Events (`runtime` → `app`):** Sent back via `crossbeam_channel::unbounded<SourceEvent>()` and multiplexed in Thread 1's `select!` event loop.
+- **Generational Search Cancellation:** Each search query increments a monotonic generation counter. If a user types a new character before an earlier network query responds, the stale reply is silently discarded upon arrival to avoid race conditions.
 
-```
-Button ⏮  →  echo prev > '$PREFIX/tmp/mixed.sock'
-Button ⏯  →  echo playpause > '$PREFIX/tmp/mixed.sock'
-Button ⏭  →  echo next > '$PREFIX/tmp/mixed.sock'
-```
-
-This gives Android 13+ users native lock-screen media controls without requiring root access or a dedicated Android app.
+**Streaming integrations:**
+- **Spotify (`sources/spotify.rs` & `audio/spotify_backend.rs`):**
+  - Web API client queries search, user playlists, albums, and tracks with automatic HTTP 429 `Retry-After` backoff.
+  - `SpotifyBackend` orchestrates a `librespot` player session that streams decoded 44.1 kHz 16-bit stereo PCM into a lock-free `PcmWriter` feeding Rodio's `PcmSource`.
+- **YouTube Music (`sources/youtube.rs` & `sources/ytdlp.rs`):**
+  - Searches and browses YouTube Music tracks via `ytmapi-rs`.
+  - Spawns background `yt-dlp` processes that download audio into `~/.cache/mixed/yt/`. Playback starts from the partial `.part` file through `audio::growing_file::GrowingFile`, a reader that waits for more data at end-of-file until the download is marked finished.
+  - Implements LRU cache eviction and an automatic 50% sequential prefetch pipeline so sequential tracks start with minimal latency.
 
 ---
 
@@ -232,20 +232,32 @@ src/
 ├── app.rs               # Central App state, tick logic, FFT thread spawn (Thread 3)
 ├── audio/
 │   ├── player.rs        # Thread 2: Audio playback, Rodio sink management, hybrid seek
+│   ├── rodio_backend.rs # AudioBackend trait implementation for Rodio sink
+│   ├── pcm_source.rs    # PcmWriter -> PcmSource lock-free bounded ring buffer
+│   ├── spotify_backend.rs # Librespot PCM playback pipeline
 │   ├── visualizer.rs    # FFT engine: Blackman-Harris window, 1/3 octave band mapping
 │   └── viz_source.rs    # VisualizerSource: sample tap with batched ring buffer writes
+├── sources/             # Thread 5: Multi-source async streaming subsystem
+│   ├── mod.rs           # MusicSource trait, SourceTab, Request/Event enums
+│   ├── runtime.rs       # Async Tokio runtime, background task coordination
+│   ├── local.rs         # Local filesystem library provider
+│   ├── spotify.rs       # Spotify Web API client & PKCE authentication
+│   ├── youtube.rs       # YouTube Music search and browse client
+│   └── ytdlp.rs         # yt-dlp downloader runner, LRU cache, prefetch
 ├── sys/
 │   ├── mod.rs           # MediaCommand enum (platform-agnostic)
 │   ├── mpris.rs         # Thread 4 (Linux): Tokio D-Bus MPRIS2 service
-│   └── android_media.rs # Thread 4 (Android): Termux UDS notification bridge
+│   └── notifications.rs # Desktop notifications over D-Bus
 ├── ui/
 │   ├── layout.rs        # Ratatui layout composition & draw()
 │   ├── events.rs        # Keyboard/mouse event dispatch
+│   ├── theme.rs         # Design tokens, curated palettes, and UI styles
+│   ├── widgets.rs       # Reusable Ratatui widgets (Header, TabBar, List, etc.)
 │   ├── artwork.rs       # Sixel cover art protocol management
 │   ├── branding.rs      # ASCII art branding & splash
-│   ├── visualizer_widget.rs  # Bar/braille spectrum widget
+│   ├── visualizer_widget.rs # Bar/braille spectrum widget
 │   └── lyrics_widget.rs # Synchronized lyrics display
-├── config/              # AppConfig (TOML), SessionState (JSON)
-├── data/                # Library tree, Playlist, Metadata, Lyrics
+├── config/              # AppConfig (JSON), SessionState (JSON), Credentials (JSON)
+├── data/                # TrackRef, UnifiedQueue, Playlist, Metadata, Lyrics
 └── utils/               # Sanitizer, helpers
 ```

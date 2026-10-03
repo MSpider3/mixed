@@ -80,10 +80,37 @@ impl SymphoniaSource {
 
         let reader = BufReader::new(file);
         let sized_source = Box::new(SizedFileSource { reader, byte_len });
-        let mss = MediaSourceStream::new(sized_source, Default::default());
+        Self::from_media_source(sized_source, file_path.extension().and_then(|e| e.to_str()))
+    }
+
+    /// Opens a file that is still being downloaded. `path` is the partial file
+    /// (e.g. `track.m4a.part`); decoding waits for data instead of ending when it
+    /// catches up with the download.
+    pub fn open_growing(
+        path: &Path,
+        progress: std::sync::Arc<crate::audio::growing_file::DownloadProgress>,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<Self, String> {
+        let source = crate::audio::growing_file::GrowingFile::open(path, progress, cancel)
+            .map_err(|e| format!("Failed to open file: {}", e))?;
+        // The container extension sits in front of the downloader's `.part` suffix
+        let ext = path
+            .file_stem()
+            .map(Path::new)
+            .and_then(|stem| stem.extension())
+            .and_then(|e| e.to_str());
+        Self::from_media_source(Box::new(source), ext)
+    }
+
+    /// Probes `source` (using `extension` as a format hint) and prepares the decoder.
+    fn from_media_source(
+        source: Box<dyn MediaSource>,
+        extension: Option<&str>,
+    ) -> Result<Self, String> {
+        let mss = MediaSourceStream::new(source, Default::default());
 
         let mut hint = Hint::new();
-        if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+        if let Some(ext) = extension {
             hint.with_extension(ext);
         }
 

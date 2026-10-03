@@ -11,7 +11,25 @@ pub struct MprisMetadataStrings {
     pub title: String,
     pub artist: String,
     pub album: String,
-    pub art_url: String, // e.g., "file:///tmp/cover.png"
+    pub art_url: String,  // e.g., "file:///tmp/cover.png"
+    pub url: String,      // e.g., "file:///...", "https://...", "spotify:track:..."
+    pub track_id: String, // valid D-Bus ObjectPath
+}
+
+fn log_mpris_error(msg: &str) {
+    if let Some(proj_dirs) = directories::ProjectDirs::from("com", "mixed", "mixed") {
+        let log_dir = proj_dirs.cache_dir();
+        let _ = std::fs::create_dir_all(log_dir);
+        let log_path = log_dir.join("mixed.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "[MPRIS] {}", msg);
+        }
+    }
 }
 
 /// Shared MPRIS state updated by the main app thread.
@@ -98,7 +116,7 @@ impl MediaPlayer2Root {
     }
     #[zbus(property)]
     fn supported_uri_schemes(&self) -> Vec<String> {
-        vec!["file".into()]
+        vec!["file".into(), "https".into(), "spotify".into()]
     }
     #[zbus(property)]
     fn supported_mime_types(&self) -> Vec<String> {
@@ -120,7 +138,7 @@ struct MediaPlayer2Player {
 impl MediaPlayer2Player {
     fn send_command(&self, cmd: MediaCommand) {
         if let Err(e) = self.command_tx.try_send(cmd) {
-            eprintln!("MPRIS: failed to enqueue command: {:?}", e);
+            log_mpris_error(&format!("failed to enqueue command: {:?}", e));
         }
     }
 }
@@ -197,7 +215,9 @@ impl MediaPlayer2Player {
 
     #[zbus(property)]
     fn metadata(&self) -> HashMap<String, zbus::zvariant::Value<'_>> {
-        let meta = self.state.metadata.read().unwrap();
+        let Ok(meta) = self.state.metadata.read() else {
+            return HashMap::new();
+        };
         let mut map = HashMap::new();
         map.insert(
             "xesam:title".into(),
@@ -219,15 +239,27 @@ impl MediaPlayer2Player {
             );
         }
 
+        if !meta.url.is_empty() {
+            map.insert(
+                "xesam:url".into(),
+                zbus::zvariant::Value::from(meta.url.clone()),
+            );
+        }
+
         map.insert(
             "mpris:length".into(),
             zbus::zvariant::Value::from(self.state.length_us.load(Ordering::Relaxed)),
         );
+        let track_path = if !meta.track_id.is_empty() {
+            zbus::zvariant::ObjectPath::try_from(meta.track_id.clone()).unwrap_or_else(|_| {
+                zbus::zvariant::ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/0").unwrap()
+            })
+        } else {
+            zbus::zvariant::ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/0").unwrap()
+        };
         map.insert(
             "mpris:trackid".into(),
-            zbus::zvariant::Value::from(
-                zbus::zvariant::ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/0").unwrap(),
-            ),
+            zbus::zvariant::Value::from(track_path),
         );
         map
     }
@@ -315,7 +347,7 @@ pub fn start_mpris(
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("MPRIS: Failed to build tokio runtime: {:?}", e);
+                log_mpris_error(&format!("Failed to build tokio runtime: {:?}", e));
                 return;
             }
         };
@@ -324,7 +356,7 @@ pub fn start_mpris(
             let conn = match Connection::session().await {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("MPRIS: Failed to connect to session D-Bus: {:?}", e);
+                    log_mpris_error(&format!("Failed to connect to session D-Bus: {:?}", e));
                     return;
                 }
             };
@@ -340,7 +372,7 @@ pub fn start_mpris(
                 .at("/org/mpris/MediaPlayer2", root)
                 .await
             {
-                eprintln!("MPRIS: Failed to register root interface: {:?}", e);
+                log_mpris_error(&format!("Failed to register root interface: {:?}", e));
                 return;
             }
 
@@ -349,7 +381,7 @@ pub fn start_mpris(
                 .at("/org/mpris/MediaPlayer2", player)
                 .await
             {
-                eprintln!("MPRIS: Failed to register player interface: {:?}", e);
+                log_mpris_error(&format!("Failed to register player interface: {:?}", e));
                 return;
             }
 
@@ -360,10 +392,10 @@ pub fn start_mpris(
                 .request_name_with_flags("org.mpris.MediaPlayer2.mixed", flags)
                 .await
             {
-                eprintln!(
-                    "MPRIS: Failed to request name org.mpris.MediaPlayer2.mixed: {:?}",
+                log_mpris_error(&format!(
+                    "Failed to request name org.mpris.MediaPlayer2.mixed: {:?}",
                     e
-                );
+                ));
                 return;
             }
 
@@ -418,7 +450,9 @@ pub fn start_mpris(
                 let can_pause = state_clone.can_pause.load(Ordering::Relaxed);
 
                 let (title, artist, album, art_url) = {
-                    let meta = state_clone.metadata.read().unwrap();
+                    let Ok(meta) = state_clone.metadata.read() else {
+                        continue;
+                    };
                     (
                         meta.title.clone(),
                         meta.artist.clone(),

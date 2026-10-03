@@ -62,6 +62,8 @@ pub struct TrackMetadata {
     pub lyrics: LyricsKind,
     pub sample_rate: Option<u32>,
     pub bitrate: Option<u32>,
+    #[serde(default)]
+    pub cover_url: Option<String>,
 }
 
 impl TrackMetadata {

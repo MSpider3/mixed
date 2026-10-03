@@ -9,17 +9,43 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         return false;
     }
 
+    // Explicit Ctrl+C global quit
+    if key.modifiers.contains(event::KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return true;
+    }
+
+    // First stage: Source switching (Ctrl+1..4 or Alt+1..4).
+    // Checked before loading guard and search input so switching works anywhere
+    // and digits are never typed into search boxes or directory input.
+    let is_ctrl = key.modifiers.contains(event::KeyModifiers::CONTROL);
+    let is_alt = key.modifiers.contains(event::KeyModifiers::ALT);
+    if is_ctrl || is_alt {
+        let target_tab = match key.code {
+            KeyCode::Char('1') => Some(crate::app::SourceTab::Local),
+            KeyCode::Char('2') => Some(crate::app::SourceTab::Spotify),
+            KeyCode::Char('3') => Some(crate::app::SourceTab::YouTube),
+            KeyCode::Char('4') => Some(crate::app::SourceTab::Unified),
+            _ => None,
+        };
+        if let Some(tab) = target_tab {
+            app.switch_source(tab);
+            return false;
+        }
+    }
+
     // Loading guard: while the audio engine is initializing on a background thread,
     // only allow safe keys (quit, navigation, search panel). All playback-related
     // keys are silently swallowed — no panic, no queuing.
     if app.player_loading && !app.awaiting_dir_input && !app.searching {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return true,
+            KeyCode::Char('q') => return true,
             KeyCode::Tab => app.next_panel(),
             KeyCode::BackTab => app.prev_panel(),
             KeyCode::F(2) => app.active_panel = ActivePanel::Queue,
-            KeyCode::F(3) => app.active_panel = ActivePanel::Library,
-            KeyCode::F(5) => {
+            KeyCode::F(3) if app.source != crate::app::SourceTab::Unified => {
+                app.active_panel = ActivePanel::Library;
+            }
+            KeyCode::F(5) if app.source != crate::app::SourceTab::Unified => {
                 app.active_panel = ActivePanel::Search;
                 app.searching = true;
                 app.search_query.clear();
@@ -44,12 +70,47 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
                 app.search_query.clear();
             }
         }
-        KeyCode::F(5) => {
+        KeyCode::F(5) if app.source != crate::app::SourceTab::Unified => {
             app.active_panel = ActivePanel::Search;
             app.searching = true;
             app.search_query.clear();
         }
         _ => {}
+    }
+
+    // If in remote credentials input mode
+    // (the prompt is only drawn in the Library panel, so only capture keys there)
+    let login_panel = app.active_panel == ActivePanel::Library;
+    if let Some(view) = app.active_source_view_mut() {
+        if view.awaiting_login_input && login_panel {
+            match key.code {
+                KeyCode::Esc => {
+                    view.awaiting_login_input = false;
+                    app.refresh_needed = true;
+                    return false;
+                }
+                KeyCode::Enter => {
+                    app.remote_enqueue_selected(false, false);
+                    return false;
+                }
+                KeyCode::Backspace => {
+                    view.login_input.pop();
+                    app.refresh_needed = true;
+                    return false;
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    view.login_input.push(c);
+                    app.refresh_needed = true;
+                    return false;
+                }
+                KeyCode::Char('u') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    view.login_input.clear();
+                    app.refresh_needed = true;
+                    return false;
+                }
+                _ => return false,
+            }
+        }
     }
 
     // If we're in search mode, handle text input
@@ -62,15 +123,30 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         return handle_dir_input(app, key);
     }
 
+    // Guard against unhandled Control key combinations firing plain character actions (e.g. Ctrl+S firing shuffle)
+    if is_ctrl {
+        return false;
+    }
+
     match key.code {
         // Global quit
-        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Char('q') => return true,
+
+        // Esc returns to Queue if in another panel
+        KeyCode::Esc => {
+            if app.active_panel != ActivePanel::Queue {
+                app.active_panel = ActivePanel::Queue;
+                app.refresh_needed = true;
+            }
+        }
 
         // View switching
         KeyCode::F(2) => app.active_panel = ActivePanel::Queue,
-        KeyCode::F(3) => app.active_panel = ActivePanel::Library,
+        KeyCode::F(3) if app.source != crate::app::SourceTab::Unified => {
+            app.active_panel = ActivePanel::Library;
+        }
         KeyCode::F(4) => app.active_panel = ActivePanel::NowPlaying,
-        KeyCode::F(5) => {
+        KeyCode::F(5) if app.source != crate::app::SourceTab::Unified => {
             app.active_panel = ActivePanel::Search;
             app.searching = true;
             app.search_query.clear();
@@ -155,7 +231,9 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Up | KeyCode::Char('k') => scroll_up(app),
         KeyCode::Down | KeyCode::Char('j') => scroll_down(app),
         KeyCode::Enter => {
-            if key.modifiers.contains(event::KeyModifiers::ALT) {
+            if key.modifiers.contains(event::KeyModifiers::SHIFT) {
+                handle_play_next(app);
+            } else if key.modifiers.contains(event::KeyModifiers::ALT) {
                 handle_enqueue_and_play(app);
             } else {
                 handle_enter(app);
@@ -227,29 +305,85 @@ fn handle_search_input(app: &mut App, key: event::KeyEvent) -> bool {
         }
         KeyCode::Enter => {
             app.searching = false;
-            if key.modifiers.contains(event::KeyModifiers::ALT) {
+            if key.modifiers.contains(event::KeyModifiers::SHIFT) {
+                handle_play_next(app);
+            } else if key.modifiers.contains(event::KeyModifiers::ALT) {
                 handle_enqueue_and_play(app);
             } else {
                 handle_enter(app);
             }
         }
         KeyCode::Backspace => {
-            app.search_query.pop();
-            app.run_search();
+            if app.source == crate::app::SourceTab::Spotify
+                || app.source == crate::app::SourceTab::YouTube
+            {
+                if let Some(view) = app.active_source_view_mut() {
+                    view.search_query.pop();
+                    app.remote_search_pending =
+                        Some((view.search_query.clone(), std::time::Instant::now()));
+                }
+            } else {
+                app.search_query.pop();
+                app.run_search();
+            }
         }
         KeyCode::Up => {
-            if app.search_cursor > 0 {
+            if app.source == crate::app::SourceTab::Spotify
+                || app.source == crate::app::SourceTab::YouTube
+            {
+                if let Some(view) = app.active_source_view_mut() {
+                    if view.search_cursor > 0 {
+                        view.search_cursor -= 1;
+                    }
+                }
+            } else if app.search_cursor > 0 {
                 app.search_cursor -= 1;
             }
         }
         KeyCode::Down => {
-            if !app.search_results.is_empty() && app.search_cursor + 1 < app.search_results.len() {
+            if app.source == crate::app::SourceTab::Spotify
+                || app.source == crate::app::SourceTab::YouTube
+            {
+                if let Some(view) = app.active_source_view_mut() {
+                    if !view.search_results.is_empty()
+                        && view.search_cursor + 1 < view.search_results.len()
+                    {
+                        view.search_cursor += 1;
+                    }
+                }
+            } else if !app.search_results.is_empty()
+                && app.search_cursor + 1 < app.search_results.len()
+            {
                 app.search_cursor += 1;
             }
         }
-        KeyCode::Char(c) => {
-            app.search_query.push(c);
-            app.run_search();
+        KeyCode::Char(c) if !key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+            if app.source == crate::app::SourceTab::Spotify
+                || app.source == crate::app::SourceTab::YouTube
+            {
+                if let Some(view) = app.active_source_view_mut() {
+                    view.search_query.push(c);
+                    app.remote_search_pending =
+                        Some((view.search_query.clone(), std::time::Instant::now()));
+                }
+            } else {
+                app.search_query.push(c);
+                app.run_search();
+            }
+        }
+        KeyCode::Char('u') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+            if app.source == crate::app::SourceTab::Spotify
+                || app.source == crate::app::SourceTab::YouTube
+            {
+                if let Some(view) = app.active_source_view_mut() {
+                    view.search_query.clear();
+                    app.remote_search_pending =
+                        Some((view.search_query.clone(), std::time::Instant::now()));
+                }
+            } else {
+                app.search_query.clear();
+                app.run_search();
+            }
         }
         _ => {}
     }
@@ -266,8 +400,11 @@ fn handle_dir_input(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Backspace => {
             app.dir_input.pop();
         }
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if !key.modifiers.contains(event::KeyModifiers::CONTROL) => {
             app.dir_input.push(c);
+        }
+        KeyCode::Char('u') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+            app.dir_input.clear();
         }
         _ => {}
     }
@@ -282,12 +419,28 @@ fn scroll_up(app: &mut App) {
             }
         }
         ActivePanel::Library => {
-            if app.library_cursor > 0 {
+            if app.source == crate::app::SourceTab::Spotify
+                || app.source == crate::app::SourceTab::YouTube
+            {
+                if let Some(view) = app.active_source_view_mut() {
+                    if view.cursor > 0 {
+                        view.cursor -= 1;
+                    }
+                }
+            } else if app.library_cursor > 0 {
                 app.library_cursor -= 1;
             }
         }
         ActivePanel::Search => {
-            if app.search_cursor > 0 {
+            if app.source == crate::app::SourceTab::Spotify
+                || app.source == crate::app::SourceTab::YouTube
+            {
+                if let Some(view) = app.active_source_view_mut() {
+                    if view.search_cursor > 0 {
+                        view.search_cursor -= 1;
+                    }
+                }
+            } else if app.search_cursor > 0 {
                 app.search_cursor -= 1;
             }
         }
@@ -307,13 +460,35 @@ fn scroll_down(app: &mut App) {
             }
         }
         ActivePanel::Library => {
-            let max = app.flat_library.len();
-            if app.library_cursor < max {
-                app.library_cursor += 1;
+            if app.source == crate::app::SourceTab::Spotify
+                || app.source == crate::app::SourceTab::YouTube
+            {
+                if let Some(view) = app.active_source_view_mut() {
+                    let max = view.flat.len().saturating_sub(1);
+                    if view.cursor < max {
+                        view.cursor += 1;
+                    }
+                }
+            } else {
+                let max = app.flat_library.len();
+                if app.library_cursor < max {
+                    app.library_cursor += 1;
+                }
             }
         }
         ActivePanel::Search => {
-            if !app.search_results.is_empty() && app.search_cursor + 1 < app.search_results.len() {
+            if app.source == crate::app::SourceTab::Spotify
+                || app.source == crate::app::SourceTab::YouTube
+            {
+                if let Some(view) = app.active_source_view_mut() {
+                    let max = view.search_results.len().saturating_sub(1);
+                    if view.search_cursor < max {
+                        view.search_cursor += 1;
+                    }
+                }
+            } else if !app.search_results.is_empty()
+                && app.search_cursor + 1 < app.search_results.len()
+            {
                 app.search_cursor += 1;
             }
         }
@@ -341,6 +516,13 @@ fn scroll_down(app: &mut App) {
 }
 
 fn handle_enter(app: &mut App) {
+    if (app.source == crate::app::SourceTab::Spotify
+        || app.source == crate::app::SourceTab::YouTube)
+        && (app.active_panel == ActivePanel::Library || app.active_panel == ActivePanel::Search)
+    {
+        app.remote_enqueue_selected(false, false);
+        return;
+    }
     match app.active_panel {
         ActivePanel::Queue => {
             if app.queue_cursor < app.playlist.len() {
@@ -368,6 +550,13 @@ fn handle_enter(app: &mut App) {
 }
 
 fn handle_enqueue_and_play(app: &mut App) {
+    if (app.source == crate::app::SourceTab::Spotify
+        || app.source == crate::app::SourceTab::YouTube)
+        && (app.active_panel == ActivePanel::Library || app.active_panel == ActivePanel::Search)
+    {
+        app.remote_enqueue_selected(true, false);
+        return;
+    }
     match app.active_panel {
         ActivePanel::Library => {
             app.library_enqueue_selected(true);
@@ -377,6 +566,58 @@ fn handle_enqueue_and_play(app: &mut App) {
         }
         _ => {}
     }
+}
+
+fn handle_play_next(app: &mut App) {
+    if (app.source == crate::app::SourceTab::Spotify
+        || app.source == crate::app::SourceTab::YouTube)
+        && (app.active_panel == ActivePanel::Library || app.active_panel == ActivePanel::Search)
+    {
+        app.remote_enqueue_selected(false, true);
+        return;
+    }
+    let entry = match app.active_panel {
+        // Row 0 is the library header; entries start at cursor 1
+        ActivePanel::Library => app
+            .library_cursor
+            .checked_sub(1)
+            .and_then(|idx| app.flat_library.get(idx))
+            .map(|item| item.entry.clone()),
+        ActivePanel::Search => app.search_results.get(app.search_cursor).cloned(),
+        _ => None,
+    };
+    let Some(entry) = entry else {
+        return;
+    };
+    let is_dir = entry.is_dir();
+    let tracks: Vec<_> = entry
+        .get_all_tracks()
+        .into_iter()
+        .filter(|(id, _)| !app.playlist.entry_ids.contains(id))
+        .collect();
+    if tracks.is_empty() {
+        return;
+    }
+
+    if app.playlist.is_empty() {
+        // Nothing is playing: queue in listed order and start from the first track
+        for (id, meta) in tracks {
+            app.playlist.add(id, meta);
+        }
+        app.playlist.current = 0;
+        app.play_current();
+    } else {
+        // Insert in reverse so the first listed track ends up directly after the current one
+        for (id, meta) in tracks.into_iter().rev() {
+            app.playlist.play_next(id, meta);
+        }
+    }
+    app.set_status(if is_dir {
+        "Folder queued next"
+    } else {
+        "Track queued next"
+    });
+    app.rebuild_flat_library_view();
 }
 
 fn handle_delete(app: &mut App) {
@@ -459,33 +700,75 @@ pub fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
                 return;
             }
 
-            // 3. Footer tab click
+            // 3a. Footer source tab click
+            if app.status_msg.is_none() {
+                if let Some(source_rect) = app.ui_bounds.footer_source_rect {
+                    if y == source_rect.y
+                        && x >= source_rect.x
+                        && x < source_rect.x + source_rect.width
+                    {
+                        const TOTAL_LEN: u16 = 39;
+                        if source_rect.width >= TOTAL_LEN {
+                            let start_x = source_rect.x + (source_rect.width - TOTAL_LEN) / 2;
+                            if x >= start_x && x < start_x + TOTAL_LEN {
+                                let offset = x - start_x;
+                                let tab = if offset < 8 {
+                                    Some(crate::app::SourceTab::Local)
+                                } else if offset < 20 {
+                                    Some(crate::app::SourceTab::Spotify)
+                                } else if offset < 32 {
+                                    Some(crate::app::SourceTab::YouTube)
+                                } else {
+                                    Some(crate::app::SourceTab::Unified)
+                                };
+                                if let Some(tab) = tab {
+                                    app.switch_source(tab);
+                                    return;
+                                }
+                            }
+                        } else {
+                            let tab_width = source_rect.width / 4;
+                            let rel_x = x - source_rect.x;
+                            if let Some(div) = rel_x.checked_div(tab_width) {
+                                let selected = div.min(3) as usize;
+                                if let Some(tab) = crate::app::SourceTab::from_index(selected) {
+                                    app.switch_source(tab);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3b. Footer tab click
             if let Some(footer_rect) = app.ui_bounds.footer_tabs_rect {
                 if y == footer_rect.y && x >= footer_rect.x && x < footer_rect.x + footer_rect.width
                 {
                     let rel_x = x - footer_rect.x;
-                    let tab_width = footer_rect.width / 5;
-                    let selected_tab = rel_x.checked_div(tab_width).unwrap_or(0).min(4);
-
-                    let prev_panel = app.active_panel;
-                    match selected_tab {
-                        0 => app.active_panel = ActivePanel::Queue,
-                        1 => app.active_panel = ActivePanel::Library,
-                        2 => app.active_panel = ActivePanel::NowPlaying,
-                        3 => {
+                    let tabs = crate::app::tabs_for(app.source);
+                    let tab_width = footer_rect.width / (tabs.len() as u16);
+                    if let Some(div) = rel_x.checked_div(tab_width) {
+                        let selected_tab = div.min(tabs.len() as u16 - 1) as usize;
+                        let prev_panel = app.active_panel;
+                        let (_, _, panel) = tabs[selected_tab];
+                        if panel == ActivePanel::Search {
                             app.active_panel = ActivePanel::Search;
                             app.searching = true;
+                            app.search_query.clear();
+                        } else {
+                            app.active_panel = panel;
                         }
-                        _ => app.active_panel = ActivePanel::Help,
-                    }
 
-                    if prev_panel == ActivePanel::Search && app.active_panel != ActivePanel::Search
-                    {
-                        app.searching = false;
-                        app.search_query.clear();
+                        if prev_panel == ActivePanel::Search
+                            && app.active_panel != ActivePanel::Search
+                        {
+                            app.searching = false;
+                            app.search_query.clear();
+                        }
+                        app.refresh_needed = true;
+                        return;
                     }
-                    app.refresh_needed = true;
-                    return;
                 }
             }
 
@@ -561,13 +844,24 @@ pub fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
                     && y >= panel_rect.y
                     && y < panel_rect.y + panel_rect.height
                 {
-                    let clicked_row = (y - panel_rect.y) as usize;
                     match app.active_panel {
                         ActivePanel::Queue => {
+                            if panel_rect.height >= 2 && y == panel_rect.y {
+                                return;
+                            }
+                            let clicked_row = if panel_rect.height >= 2 {
+                                (y - panel_rect.y - 1) as usize
+                            } else {
+                                (y - panel_rect.y) as usize
+                            };
+                            let visible_height = if panel_rect.height >= 2 {
+                                (panel_rect.height - 1) as usize
+                            } else {
+                                panel_rect.height as usize
+                            };
                             let visual_items = app
                                 .playlist
                                 .get_visual_items(app.show_folders, app.config.strip_track_numbers);
-                            let visible_height = panel_rect.height as usize;
                             let half = visible_height / 2;
                             let mut highlighted_idx = 0;
                             for (idx, item) in visual_items.iter().enumerate() {
@@ -610,40 +904,83 @@ pub fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
                             }
                         }
                         ActivePanel::Library => {
-                            let visible_height = panel_rect.height as usize;
-                            let total_items = app.flat_library.len() + 1;
-                            let scroll =
-                                if visible_height > 0 && app.library_cursor >= visible_height {
-                                    app.library_cursor - visible_height + 1
-                                } else {
-                                    0
+                            let clicked_row = (y - panel_rect.y) as usize;
+                            if app.source == crate::app::SourceTab::Spotify
+                                || app.source == crate::app::SourceTab::YouTube
+                            {
+                                if let Some(view) = app.active_source_view_mut() {
+                                    let visible_height = panel_rect.height as usize;
+                                    let (start, end) = crate::ui::widgets::scroll_offset(
+                                        view.cursor,
+                                        view.flat.len(),
+                                        visible_height,
+                                    );
+                                    let target_cursor = start + clicked_row;
+                                    if target_cursor < end {
+                                        if view.cursor == target_cursor {
+                                            handle_enter(app);
+                                        } else {
+                                            view.cursor = target_cursor;
+                                        }
+                                    }
                                 }
-                                .min(total_items.saturating_sub(1));
-                            let target_cursor = scroll + clicked_row;
-                            if target_cursor < total_items {
-                                if app.library_cursor == target_cursor {
-                                    handle_enter(app);
-                                } else {
-                                    app.library_cursor = target_cursor;
+                            } else {
+                                let visible_height = panel_rect.height as usize;
+                                let total_items = app.flat_library.len() + 1;
+                                let scroll =
+                                    if visible_height > 0 && app.library_cursor >= visible_height {
+                                        app.library_cursor - visible_height + 1
+                                    } else {
+                                        0
+                                    }
+                                    .min(total_items.saturating_sub(1));
+                                let target_cursor = scroll + clicked_row;
+                                if target_cursor < total_items {
+                                    if app.library_cursor == target_cursor {
+                                        handle_enter(app);
+                                    } else {
+                                        app.library_cursor = target_cursor;
+                                    }
                                 }
                             }
                         }
-                        ActivePanel::Search if clicked_row >= 2 => {
+                        ActivePanel::Search if (y - panel_rect.y) >= 2 => {
+                            let clicked_row = (y - panel_rect.y) as usize;
                             let list_row = clicked_row - 2;
                             let results_height = panel_rect.height.saturating_sub(2) as usize;
-                            let scroll =
-                                if results_height > 0 && app.search_cursor >= results_height {
-                                    app.search_cursor - results_height + 1
-                                } else {
-                                    0
+                            if app.source == crate::app::SourceTab::Spotify
+                                || app.source == crate::app::SourceTab::YouTube
+                            {
+                                if let Some(view) = app.active_source_view_mut() {
+                                    let (start, end) = crate::ui::widgets::scroll_offset(
+                                        view.search_cursor,
+                                        view.search_results.len(),
+                                        results_height,
+                                    );
+                                    let target_idx = start + list_row;
+                                    if target_idx < end {
+                                        if view.search_cursor == target_idx {
+                                            handle_enter(app);
+                                        } else {
+                                            view.search_cursor = target_idx;
+                                        }
+                                    }
                                 }
-                                .min(app.search_results.len().saturating_sub(1));
-                            let target_idx = scroll + list_row;
-                            if target_idx < app.search_results.len() {
-                                if app.search_cursor == target_idx {
-                                    handle_enter(app);
-                                } else {
-                                    app.search_cursor = target_idx;
+                            } else {
+                                let scroll =
+                                    if results_height > 0 && app.search_cursor >= results_height {
+                                        app.search_cursor - results_height + 1
+                                    } else {
+                                        0
+                                    }
+                                    .min(app.search_results.len().saturating_sub(1));
+                                let target_idx = scroll + list_row;
+                                if target_idx < app.search_results.len() {
+                                    if app.search_cursor == target_idx {
+                                        handle_enter(app);
+                                    } else {
+                                        app.search_cursor = target_idx;
+                                    }
                                 }
                             }
                         }

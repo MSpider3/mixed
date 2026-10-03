@@ -2,16 +2,52 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
-use crossbeam_channel::{bounded, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 
 use crate::audio::rodio_backend::RodioBackend;
 use crate::audio::viz_source::SharedSampleBuffer;
 
+/// Media input types that the audio player can load and play.
+#[derive(Debug, Clone)]
+pub enum PlayInput {
+    File(PathBuf),
+    /// A partial file that a downloader is still appending to.
+    Growing {
+        path: PathBuf,
+        progress: Arc<crate::audio::growing_file::DownloadProgress>,
+    },
+    Spotify(String),
+}
+
+impl From<PathBuf> for PlayInput {
+    fn from(p: PathBuf) -> Self {
+        PlayInput::File(p)
+    }
+}
+
+impl From<&Path> for PlayInput {
+    fn from(p: &Path) -> Self {
+        PlayInput::File(p.to_path_buf())
+    }
+}
+
+/// Events produced by the audio playback thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlayerEvent {
+    Loaded { generation: u64 },
+    Buffering { generation: u64 },
+    Failed { generation: u64, error: String },
+    Finished { generation: u64 },
+    Position { generation: u64, position_ms: u64 },
+}
+
 /// Commands sent to the background player thread.
 pub enum PlayerCmd {
     Load {
-        path: PathBuf,
+        input: PlayInput,
         start_pos_ms: Option<u64>,
+        duration_ms: Option<u64>,
+        generation: u64,
     },
     Play,
     Pause,
@@ -32,6 +68,23 @@ impl AudioBackend {
         self.0.play(path)
     }
 
+    pub fn play_growing(
+        &mut self,
+        path: &Path,
+        progress: Arc<crate::audio::growing_file::DownloadProgress>,
+        fallback_duration: Option<std::time::Duration>,
+    ) -> Result<(), String> {
+        self.0.play_growing(path, progress, fallback_duration)
+    }
+
+    pub fn play_pcm_source(
+        &mut self,
+        source: crate::audio::pcm_source::PcmSource,
+        duration: Option<std::time::Duration>,
+    ) -> Result<(), String> {
+        self.0.play_pcm_source(source, duration)
+    }
+
     pub fn pause(&mut self) {
         self.0.pause();
     }
@@ -46,6 +99,10 @@ impl AudioBackend {
 
     pub fn get_position(&mut self) -> std::time::Duration {
         self.0.get_position()
+    }
+
+    pub fn sync_position(&mut self, pos_ms: u64) {
+        self.0.sync_position(pos_ms);
     }
 
     pub fn stop(&mut self) {
@@ -76,14 +133,16 @@ impl AudioBackend {
 /// Thread-isolated audio player wrapping AudioBackend.
 pub struct Player {
     cmd_tx: Sender<PlayerCmd>,
+    pub event_rx: Receiver<PlayerEvent>,
     pub sample_buffer: SharedSampleBuffer,
+    pub generation: u64,
 
     // Shared atomic states.
     pub is_paused: Arc<AtomicBool>,
     pub is_playing: Arc<AtomicBool>,
     is_finished: Arc<AtomicBool>,
     volume: Arc<AtomicU8>,
-    elapsed_ms: Arc<AtomicU64>,
+    pub elapsed_ms: Arc<AtomicU64>,
     total_duration_ms: Arc<AtomicU64>,
     current_sample_rate: Arc<AtomicU32>,
 }
@@ -91,6 +150,7 @@ pub struct Player {
 impl Player {
     pub fn new() -> Option<Self> {
         let (cmd_tx, cmd_rx) = bounded::<PlayerCmd>(100);
+        let (event_tx, event_rx) = bounded::<PlayerEvent>(100);
 
         let is_paused = Arc::new(AtomicBool::new(false));
         let is_playing = Arc::new(AtomicBool::new(false));
@@ -119,41 +179,131 @@ impl Player {
 
             // Sync initial volume
             backend.set_volume(80);
+            let mut current_generation = 0u64;
+            let mut was_finished = true;
+
+            let mut spotify_backend = crate::audio::spotify_backend::SpotifyBackend::new();
+            // librespot is only driven while the loaded track is a Spotify stream.
+            let mut current_is_spotify = false;
 
             loop {
                 // Poll commands; recv_timeout keeps real-time constraints
                 match cmd_rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                    Ok(PlayerCmd::Load { path, start_pos_ms }) => {
-                        let path_str = path.to_string_lossy().to_string();
-                        match backend.play(&path_str) {
-                            Ok(()) => {
-                                if let Some(pos_ms) = start_pos_ms {
-                                    backend.seek_to(std::time::Duration::from_millis(pos_ms));
+                    Ok(PlayerCmd::Load {
+                        input,
+                        start_pos_ms,
+                        duration_ms,
+                        generation,
+                    }) => {
+                        current_generation = generation;
+                        was_finished = false;
+                        match input {
+                            input @ (PlayInput::File(_) | PlayInput::Growing { .. }) => {
+                                current_is_spotify = false;
+                                spotify_backend.stop();
+                                let played = match input {
+                                    PlayInput::Growing { path, progress } => backend.play_growing(
+                                        &path,
+                                        progress,
+                                        duration_ms.map(std::time::Duration::from_millis),
+                                    ),
+                                    PlayInput::File(path) => backend.play(&path.to_string_lossy()),
+                                    PlayInput::Spotify(_) => unreachable!(),
+                                };
+                                match played {
+                                    Ok(()) => {
+                                        if let Some(pos_ms) = start_pos_ms {
+                                            backend
+                                                .seek_to(std::time::Duration::from_millis(pos_ms));
+                                        }
+                                        is_paused_clone.store(false, Ordering::Release);
+                                        is_playing_clone.store(true, Ordering::Release);
+                                        is_finished_clone.store(false, Ordering::Release);
+                                        let _ = event_tx.send(PlayerEvent::Loaded { generation });
+                                    }
+                                    Err(e) => {
+                                        is_playing_clone.store(false, Ordering::Release);
+                                        is_finished_clone.store(true, Ordering::Release);
+                                        was_finished = true;
+                                        let _ = event_tx.send(PlayerEvent::Failed {
+                                            generation,
+                                            error: e,
+                                        });
+                                    }
                                 }
-                                is_paused_clone.store(false, Ordering::Release);
-                                is_playing_clone.store(true, Ordering::Release);
-                                is_finished_clone.store(false, Ordering::Release);
                             }
-                            Err(e) => {
-                                eprintln!("Failed to play: {}", e);
+                            PlayInput::Spotify(uri) => {
+                                current_is_spotify = true;
+                                // Silence the previous track while the stream connects.
+                                backend.stop();
+                                let _ = event_tx.send(PlayerEvent::Buffering { generation });
+                                let pos = start_pos_ms.unwrap_or(0) as u32;
+                                match spotify_backend.load(&uri, pos) {
+                                    Ok(()) => {
+                                        let source = spotify_backend.get_or_create_source();
+                                        let duration_dur =
+                                            duration_ms.map(std::time::Duration::from_millis);
+                                        if let Some(dur) = duration_ms {
+                                            total_duration_ms_clone.store(dur, Ordering::Release);
+                                        }
+                                        match backend.play_pcm_source(source, duration_dur) {
+                                            Ok(()) => {
+                                                is_paused_clone.store(false, Ordering::Release);
+                                                is_playing_clone.store(true, Ordering::Release);
+                                                is_finished_clone.store(false, Ordering::Release);
+                                                let _ = event_tx
+                                                    .send(PlayerEvent::Loaded { generation });
+                                            }
+                                            Err(e) => {
+                                                is_playing_clone.store(false, Ordering::Release);
+                                                is_finished_clone.store(true, Ordering::Release);
+                                                was_finished = true;
+                                                let _ = event_tx.send(PlayerEvent::Failed {
+                                                    generation,
+                                                    error: e,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        is_playing_clone.store(false, Ordering::Release);
+                                        is_finished_clone.store(true, Ordering::Release);
+                                        was_finished = true;
+                                        let _ = event_tx.send(PlayerEvent::Failed {
+                                            generation,
+                                            error: e,
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
                     Ok(PlayerCmd::Play) => {
                         backend.resume();
+                        if current_is_spotify {
+                            spotify_backend.resume();
+                        }
                         is_paused_clone.store(false, Ordering::Release);
                         is_playing_clone.store(true, Ordering::Release);
                     }
                     Ok(PlayerCmd::Pause) => {
                         backend.pause();
+                        if current_is_spotify {
+                            spotify_backend.pause();
+                        }
                         is_paused_clone.store(true, Ordering::Release);
                         is_playing_clone.store(false, Ordering::Release);
                     }
                     Ok(PlayerCmd::Seek(pos_ms)) => {
                         backend.seek_to(std::time::Duration::from_millis(pos_ms));
+                        if current_is_spotify {
+                            spotify_backend.seek(pos_ms as u32);
+                        }
                     }
                     Ok(PlayerCmd::Stop) => {
                         backend.stop();
+                        spotify_backend.stop();
+                        was_finished = true;
                         is_paused_clone.store(false, Ordering::Release);
                         is_playing_clone.store(false, Ordering::Release);
                         is_finished_clone.store(true, Ordering::Release);
@@ -167,6 +317,28 @@ impl Player {
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 }
 
+                // librespot reported the loaded track as unplayable
+                if let Some(error) = spotify_backend.take_failure() {
+                    if current_is_spotify && !was_finished {
+                        backend.stop();
+                        spotify_backend.stop();
+                        was_finished = true;
+                        is_playing_clone.store(false, Ordering::Release);
+                        is_finished_clone.store(true, Ordering::Release);
+                        let _ = event_tx.send(PlayerEvent::Failed {
+                            generation: current_generation,
+                            error,
+                        });
+                    }
+                }
+
+                // Align the clock with the position librespot is actually playing
+                if let Some(pos_ms) = spotify_backend.take_position_ms() {
+                    if current_is_spotify {
+                        backend.sync_position(pos_ms);
+                    }
+                }
+
                 // Update elapsed tracking
                 let elapsed = backend.get_position();
                 elapsed_ms_clone.store(elapsed.as_millis() as u64, Ordering::Relaxed);
@@ -176,15 +348,19 @@ impl Player {
                     total_duration_ms_clone.store(dur.as_millis() as u64, Ordering::Relaxed);
                 }
 
-                // Update finished state
+                // Update finished state and send Finished event on transition
                 let finished = backend.is_finished();
                 is_finished_clone.store(finished, Ordering::Release);
-                if finished {
+                if finished && !was_finished {
+                    was_finished = true;
                     is_playing_clone.store(false, Ordering::Release);
                     let total = total_duration_ms_clone.load(Ordering::Relaxed);
                     if total > 0 {
                         elapsed_ms_clone.store(total, Ordering::Relaxed);
                     }
+                    let _ = event_tx.send(PlayerEvent::Finished {
+                        generation: current_generation,
+                    });
                 }
 
                 // Update volume atomic to match backend volume
@@ -198,7 +374,9 @@ impl Player {
 
         Some(Self {
             cmd_tx,
+            event_rx,
             sample_buffer,
+            generation: 0,
             is_paused,
             is_playing,
             is_finished,
@@ -209,8 +387,50 @@ impl Player {
         })
     }
 
+    pub fn next_generation(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    pub fn load(&mut self, input: impl Into<PlayInput>) -> Result<(), String> {
+        self.load_with_pos(input, None)
+    }
+
+    pub fn load_with_pos(
+        &mut self,
+        input: impl Into<PlayInput>,
+        start_pos_ms: Option<u64>,
+    ) -> Result<(), String> {
+        self.load_with_pos_and_duration(input, start_pos_ms, None)
+    }
+
+    pub fn load_with_pos_and_duration(
+        &mut self,
+        input: impl Into<PlayInput>,
+        start_pos_ms: Option<u64>,
+        duration_ms: Option<u64>,
+    ) -> Result<(), String> {
+        self.generation = self.generation.wrapping_add(1);
+        let gen = self.generation;
+        self.is_paused.store(false, Ordering::Release);
+        self.is_playing.store(true, Ordering::Release);
+        self.is_finished.store(false, Ordering::Release);
+        let pos = start_pos_ms.unwrap_or(0);
+        self.elapsed_ms.store(pos, Ordering::Release);
+        if let Some(dur) = duration_ms {
+            self.total_duration_ms.store(dur, Ordering::Release);
+        }
+        let _ = self.cmd_tx.send(PlayerCmd::Load {
+            input: input.into(),
+            start_pos_ms,
+            duration_ms,
+            generation: gen,
+        });
+        Ok(())
+    }
+
     pub fn load_track(&mut self, path: &Path) -> Result<(), String> {
-        self.load_track_with_pos(path, None)
+        self.load_with_pos(path.to_path_buf(), None)
     }
 
     pub fn load_track_with_pos(
@@ -218,16 +438,7 @@ impl Player {
         path: &Path,
         start_pos_ms: Option<u64>,
     ) -> Result<(), String> {
-        self.is_paused.store(false, Ordering::Release);
-        self.is_playing.store(true, Ordering::Release);
-        self.is_finished.store(false, Ordering::Release);
-        let pos = start_pos_ms.unwrap_or(0);
-        self.elapsed_ms.store(pos, Ordering::Release);
-        let _ = self.cmd_tx.send(PlayerCmd::Load {
-            path: path.to_path_buf(),
-            start_pos_ms,
-        });
-        Ok(())
+        self.load_with_pos(path.to_path_buf(), start_pos_ms)
     }
 
     pub fn play(&mut self) {

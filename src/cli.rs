@@ -96,16 +96,19 @@ pub fn print_help() {
             -v, -V, --version    Print version information\n\
         \n\
         KEYBOARD SHORTCUTS:\n    \
-            F1-F5                Switch views (Help, Queue, Library, Search, Full Lyrics)\n    \
+            F2-F6                Switch views (Queue, Library, Track, Search, Help)\n    \
             Space                Play / Pause\n    \
-            Left / Right (h/l)   Seek backward / forward 5s (Shift for 30s)\n    \
+            Left / Right (h/l)   Previous / next track\n    \
+            a / d                Seek backward / forward 5s\n    \
             Up / Down (j/k)      Navigate lists / tracks\n    \
             Enter                Play selected track / expand folder\n    \
+            Shift+Enter          Play next\n    \
+            Delete               Remove selected track from queue\n    \
             Tab                  Cycle active panels\n    \
-            v                    Toggle visualizer\n    \
+            v                    Toggle visualizer mode\n    \
             s                    Toggle shuffle mode\n    \
-            r                    Cycle repeat mode (Off, All, One)\n    \
-            + / - (m/M)          Adjust volume / mute\n    \
+            r                    Cycle repeat mode (Off, Track, Queue)\n    \
+            + / -                Adjust volume\n    \
             q, Ctrl+C            Quit\n",
         name = NAME,
         version = VERSION,

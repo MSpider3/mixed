@@ -5,6 +5,52 @@ All notable changes to the **mixed** music player will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-10-03
+
+### Added
+- **Multi-Source Streaming System**:
+  - Full multi-source playback architecture supporting **Local Files**, **Spotify**, and **YouTube Music** inside a **Unified Queue**.
+  - Fast source switching via `Ctrl+1..4` (Local, Spotify, YouTube Music, Unified) with `Alt+1..4` fallback support for all terminal emulators.
+  - Per-source panel memory: switching between sources preserves active tab (Queue, Library, Search) and cursor locations independently.
+  - Search routing: active source panel isolates search queries to the currently viewed source with monotonic generation counters discarding stale async replies.
+- **Spotify Streaming Integration (`librespot` & Web API)**:
+  - Direct PCM streaming backend (`SpotifyBackend`) feeding into Rodio's sink via lock-free bounded `PcmSource` ring buffer.
+  - Spotify Web API client (`SpotifyClient`) with automated PKCE OAuth token refresh and HTTP 429 `Retry-After` backoff retry.
+  - Support for browsing saved tracks, saved albums, user playlists, and searching Spotify's catalog (search pages of 10, playlist contents via `/playlists/{id}/items`).
+  - Playback clock synchronised to librespot's reported position, so elapsed time no longer runs ahead while a track buffers.
+  - Remote libraries and search results render as an indented tree; `Enter` opens and closes albums, playlists and folders.
+  - Disconnected and expired session guards: preserved remote tracks remain in the queue and inform users with helpful setup guidance without crashing or dropping items.
+- **YouTube Music Streaming Integration (`ytmapi-rs` & `yt-dlp`)**:
+  - High-performance YouTube Music search and browse client isolated behind the `MusicSource` trait.
+  - Background audio download and caching with LRU cache eviction and automatic 50% sequential prefetch.
+  - Clear `downloading…` progress status display during cold-start audio caching.
+  - Progressive playback: a track starts playing from the partial `yt-dlp` download as soon as the first ~190 KB have arrived, with seeking limited to the downloaded range until the file is complete (`--fixup never` keeps the file byte-stable while it plays). Falls back to download-then-play when the partial file cannot be decoded.
+  - Isolated smoke test suite for live API drift detection.
+- **Shared UI Kit & Theme Token System**:
+  - Extracted shared design tokens into `src/ui/theme.rs` and modular widgets into `src/ui/widgets.rs`.
+  - Data-driven footer tabs and header badges with mouse hit-testing.
+- **MPRIS Enhancement & Remote Source Support**:
+  - Extended MPRIS D-Bus interface with support for `https` and `spotify` URI schemes.
+  - Generated unique, specification-compliant `mpris:trackid` and `xesam:url` attributes for local, Spotify, and YouTube tracks.
+- **Safe Background Logging**:
+  - Redirected background diagnostics and error outputs cleanly to `~/.cache/mixed/mixed.log`, protecting terminal raw mode from screen corruption.
+
+### Fixed
+- **Audit Hardening & Core Stability (B1–B8, A1–A3, Q1–Q6)**:
+  - Eliminated main thread blocking and unbounded channel allocation in audio/visualizer pipelines.
+  - Resolved visualizer wake-up storms via `crossbeam_channel::bounded(1)` throttling.
+  - Enforced atomic state exports and batched ring buffer flushes (`BATCH_SIZE = 64`), reducing mutex contention by 64×.
+  - Fixed duplicate seek race conditions and out-of-bounds lyrics view panics.
+  - Resolved startup panic in player thread by initializing an isolated Tokio runtime (`mixed-spotify-rt`) for the `librespot` session.
+  - Implemented backpressure via `AtomicBool` on the Spotify sink buffer to prevent sample dropping.
+  - Added session auto-connect and persistent refresh token storage to `credentials.json`.
+  - Fixed track auto-advance and audio starvation (`take_source()` one-shot depletion) for Spotify streams.
+  - Mitigated YouTube playback hijacking race conditions using strict generation tracking.
+  - Implemented in-flight download deduplication and cache eviction limits for `yt-dlp`.
+  - Corrected layout and event routing: decoupled `play_next` from `play_now`, fixed mouse hit-testing offsets, stabilized remote search cursors, and eliminated keyboard freezes on disconnected states.
+  - Refined fallback codec selection for `yt-dlp` to ensure native Symphonia decoding support (`m4a`, `mp3`, `aac`).
+  - Adjusted error reporting and panic hooks to restore terminal state and output to `stdout` securely.
+
 ## [1.6.0] - 2026-09-19
 
 ### Fixed

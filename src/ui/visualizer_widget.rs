@@ -11,8 +11,10 @@ use std::cell::RefCell;
 /// Block characters for spectrum bars (8 levels of height).
 const BAR_CHARS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+use crate::ui::theme::{C_ACCENT, C_ACCENT2, C_CYAN};
+
 /// Gradient colors for bar height (bottom to top).
-const SPECTRUM_GRADIENT: &[Color] = &[Color::Cyan, Color::Magenta, Color::LightMagenta];
+const SPECTRUM_GRADIENT: &[Color] = &[C_CYAN, C_ACCENT, C_ACCENT2];
 
 thread_local! {
     /// Cache of pre-repeated bar character strings for the current bar_width.

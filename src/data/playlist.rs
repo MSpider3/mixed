@@ -2,6 +2,7 @@
 use std::path::PathBuf;
 
 use crate::data::metadata::TrackMetadata;
+use crate::data::track::TrackRef;
 
 /// Repeat mode for the player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -54,10 +55,23 @@ pub enum QueueVisualItem {
 }
 
 /// A single entry in the playlist / queue.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlaylistEntry {
-    pub path: PathBuf,
+    pub id: TrackRef,
     pub metadata: TrackMetadata,
+}
+
+impl PlaylistEntry {
+    pub fn new(id: impl Into<TrackRef>, metadata: TrackMetadata) -> Self {
+        Self {
+            id: id.into(),
+            metadata,
+        }
+    }
+
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.id.local_path()
+    }
 }
 
 /// The playlist / queue manager.
@@ -69,7 +83,7 @@ pub struct Playlist {
     pub shuffle: bool,
     pub play_order: Vec<usize>,
     pub cached_visual_items: std::cell::RefCell<Option<(bool, bool, Vec<QueueVisualItem>)>>,
-    pub entry_paths: std::collections::HashSet<PathBuf>,
+    pub entry_ids: std::collections::HashSet<TrackRef>,
 }
 
 impl Default for Playlist {
@@ -81,7 +95,7 @@ impl Default for Playlist {
             shuffle: false,
             play_order: Vec::new(),
             cached_visual_items: std::cell::RefCell::new(None),
-            entry_paths: std::collections::HashSet::new(),
+            entry_ids: std::collections::HashSet::new(),
         }
     }
 }
@@ -133,11 +147,12 @@ impl Playlist {
         }
     }
 
-    pub fn add(&mut self, path: PathBuf, metadata: TrackMetadata) {
+    pub fn add(&mut self, id: impl Into<TrackRef>, metadata: TrackMetadata) {
         *self.cached_visual_items.borrow_mut() = None;
         let new_idx = self.entries.len();
-        self.entry_paths.insert(path.clone());
-        self.entries.push(PlaylistEntry { path, metadata });
+        let id = id.into();
+        self.entry_ids.insert(id.clone());
+        self.entries.push(PlaylistEntry { id, metadata });
         self.play_order.push(new_idx);
 
         // If shuffle is active, keep current first and shuffle the rest
@@ -169,8 +184,8 @@ impl Playlist {
         *self.cached_visual_items.borrow_mut() = None;
         if idx < self.entries.len() {
             let playing_real = self.current_real_index();
-            self.entries.remove(idx);
-            self.entry_paths = self.entries.iter().map(|e| e.path.clone()).collect();
+            let removed = self.entries.remove(idx);
+            self.entry_ids.remove(&removed.id);
 
             // Rebuild play_order
             let mut new_order = Vec::new();
@@ -212,12 +227,32 @@ impl Playlist {
         self.entries.clear();
         self.play_order.clear();
         self.current = 0;
-        self.entry_paths.clear();
+        self.entry_ids.clear();
     }
 
     pub fn current_entry(&self) -> Option<&PlaylistEntry> {
         self.current_real_index()
             .and_then(|idx| self.entries.get(idx))
+    }
+
+    pub fn peek_next_entry(&self) -> Option<&PlaylistEntry> {
+        if self.play_order.is_empty() {
+            return None;
+        }
+        let next_pos = match self.repeat {
+            RepeatMode::Track => Some(self.current),
+            RepeatMode::Queue => Some((self.current + 1) % self.play_order.len()),
+            RepeatMode::Off => {
+                if self.current + 1 < self.play_order.len() {
+                    Some(self.current + 1)
+                } else {
+                    None
+                }
+            }
+        };
+        next_pos
+            .and_then(|pos| self.play_order.get(pos))
+            .and_then(|&real_idx| self.entries.get(real_idx))
     }
 
     pub fn can_go_next(&self) -> bool {
@@ -371,7 +406,11 @@ impl Playlist {
             let mut prev_parent: Option<PathBuf> = None;
             for (idx, entry) in self.entries.iter().enumerate() {
                 if show_folders {
-                    let parent = entry.path.parent().map(|p| p.to_path_buf());
+                    let parent = entry
+                        .id
+                        .local_path()
+                        .and_then(|p| p.parent())
+                        .map(|p| p.to_path_buf());
                     let same = match (&prev_parent, &parent) {
                         (Some(a), Some(b)) => a == b,
                         _ => false,
@@ -380,13 +419,14 @@ impl Playlist {
                         if prev_parent.is_some() {
                             items.push(QueueVisualItem::Separator);
                         }
-                        let name = parent
-                            .as_deref()
-                            .and_then(|p| p.file_name())
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("Unknown")
-                            .to_string();
-                        items.push(QueueVisualItem::Header { name });
+                        if let Some(p) = &parent {
+                            let name = p
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("Unknown")
+                                .to_string();
+                            items.push(QueueVisualItem::Header { name });
+                        }
                         prev_parent = parent;
                     }
                 }
@@ -421,9 +461,58 @@ impl Playlist {
         })
     }
 
-    pub fn paths(&self) -> Vec<PathBuf> {
-        self.entries.iter().map(|e| e.path.clone()).collect()
+    pub fn ids(&self) -> Vec<TrackRef> {
+        self.entries.iter().map(|e| e.id.clone()).collect()
     }
+
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.id.local_path().map(|p| p.to_path_buf()))
+            .collect()
+    }
+
+    /// Insert a track immediately after the current playing position in play_order.
+    pub fn play_next(&mut self, id: impl Into<TrackRef>, metadata: TrackMetadata) {
+        *self.cached_visual_items.borrow_mut() = None;
+        let new_real_idx = self.entries.len();
+        let id = id.into();
+        self.entry_ids.insert(id.clone());
+        self.entries.push(PlaylistEntry { id, metadata });
+
+        // Insert into play_order right after the current cursor
+        let insert_at = (self.current + 1).min(self.play_order.len());
+        self.play_order.insert(insert_at, new_real_idx);
+    }
+
+    /// Returns total duration of all queued tracks in whole seconds.
+    pub fn total_duration_secs(&self) -> u64 {
+        self.entries
+            .iter()
+            .filter_map(|e| e.metadata.duration)
+            .map(|d| d.as_secs())
+            .sum()
+    }
+}
+
+/// Sort tracks consistently by album: disc number, then track number, then filename.
+pub fn sort_tracks_by_album(tracks: &mut [(TrackRef, TrackMetadata)]) {
+    tracks.sort_by(|(id_a, meta_a), (id_b, meta_b)| {
+        let disc_a = meta_a.disc_number.unwrap_or(1);
+        let disc_b = meta_b.disc_number.unwrap_or(1);
+
+        let track_a = meta_a.track_number.unwrap_or(u32::MAX);
+        let track_b = meta_b.track_number.unwrap_or(u32::MAX);
+
+        disc_a
+            .cmp(&disc_b)
+            .then(track_a.cmp(&track_b))
+            .then_with(|| {
+                let name_a = id_a.local_path().and_then(|p| p.file_name());
+                let name_b = id_b.local_path().and_then(|p| p.file_name());
+                name_a.cmp(&name_b)
+            })
+    });
 }
 
 #[cfg(test)]
@@ -468,5 +557,78 @@ mod tests {
         playlist.repeat = RepeatMode::Track;
         assert!(playlist.can_go_next());
         assert!(playlist.can_go_previous());
+    }
+
+    #[test]
+    fn test_remove_cleans_entry_ids() {
+        let mut playlist = Playlist::new();
+        add_track(&mut playlist, "track1.mp3");
+        let id = TrackRef::Local(PathBuf::from("track1.mp3"));
+        assert!(playlist.entry_ids.contains(&id));
+        playlist.remove(0);
+        assert!(!playlist.entry_ids.contains(&id));
+        assert!(playlist.is_empty());
+    }
+
+    #[test]
+    fn test_play_next_inserts_after_current() {
+        let mut playlist = Playlist::new();
+        add_track(&mut playlist, "track1.mp3");
+        add_track(&mut playlist, "track2.mp3");
+        playlist.current = 0; // playing track1 (real idx 0)
+
+        playlist.play_next(PathBuf::from("track_next.mp3"), TrackMetadata::default());
+        // entries has [track1, track2, track_next]
+        // play_order should have track_next (real idx 2) right after current (0): [0, 2, 1]
+        assert_eq!(playlist.play_order, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn test_total_duration_secs() {
+        let mut playlist = Playlist::new();
+        let m1 = TrackMetadata {
+            duration: Some(std::time::Duration::from_secs(125)),
+            ..Default::default()
+        };
+        let m2 = TrackMetadata {
+            duration: Some(std::time::Duration::from_secs(75)),
+            ..Default::default()
+        };
+
+        playlist.add(PathBuf::from("t1.mp3"), m1);
+        playlist.add(PathBuf::from("t2.mp3"), m2);
+
+        assert_eq!(playlist.total_duration_secs(), 200);
+    }
+
+    #[test]
+    fn test_sort_tracks_by_album() {
+        let mut t1 = (
+            TrackRef::Local(PathBuf::from("b.mp3")),
+            TrackMetadata::default(),
+        );
+        t1.1.disc_number = Some(1);
+        t1.1.track_number = Some(2);
+
+        let mut t2 = (
+            TrackRef::Local(PathBuf::from("a.mp3")),
+            TrackMetadata::default(),
+        );
+        t2.1.disc_number = Some(1);
+        t2.1.track_number = Some(1);
+
+        let mut t3 = (
+            TrackRef::Local(PathBuf::from("c.mp3")),
+            TrackMetadata::default(),
+        );
+        t3.1.disc_number = Some(2);
+        t3.1.track_number = Some(1);
+
+        let mut tracks = vec![t1, t3, t2];
+        sort_tracks_by_album(&mut tracks);
+
+        assert_eq!(tracks[0].0, TrackRef::Local(PathBuf::from("a.mp3")));
+        assert_eq!(tracks[1].0, TrackRef::Local(PathBuf::from("b.mp3")));
+        assert_eq!(tracks[2].0, TrackRef::Local(PathBuf::from("c.mp3")));
     }
 }

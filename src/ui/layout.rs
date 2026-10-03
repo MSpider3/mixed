@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Gauge, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
@@ -16,24 +16,44 @@ use crate::ui::branding;
 use crate::ui::lyrics_widget;
 use crate::ui::visualizer_widget;
 
-// ─── Native Terminal theme palette (follows terminal settings) ───
-const C_FG: Color = Color::Reset;
-const C_ACCENT: Color = Color::Magenta;
-const C_ACCENT2: Color = Color::LightMagenta;
-const C_CYAN: Color = Color::Cyan;
-const C_GREEN: Color = Color::Green;
-const C_ORANGE: Color = Color::Yellow;
-const C_DIM: Color = Color::DarkGray;
-const C_SURFACE: Color = Color::DarkGray;
+pub use crate::ui::theme::*;
+pub use crate::ui::widgets::*;
 
 /// Main render function — dispatches to the appropriate view inside a global two-pane layout.
-fn render_instructions(f: &mut Frame, area: Rect, panel: ActivePanel) {
+fn render_instructions(
+    f: &mut Frame,
+    area: Rect,
+    panel: ActivePanel,
+    source: crate::sources::SourceTab,
+) {
     let text = match panel {
-        ActivePanel::Queue => "Move: ↑/↓/k/j  •  Play: Enter  •  Remove: d",
-        ActivePanel::Library => "Navigate: ↑/↓/k/j  •  Expand/Enqueue: Enter  •  Search: /",
-        ActivePanel::Search => "Type to search  •  Select: ↑/↓  •  Enqueue: Enter",
-        ActivePanel::NowPlaying => "Lyrics Mode: m  •  Visualizer Mode: v",
-        ActivePanel::Help => "Switch Views: F2-F6 / Tab  •  Quit: q / Esc",
+        ActivePanel::Queue => match source {
+            crate::sources::SourceTab::Unified => {
+                "Unified Queue  •  Sources: Ctrl+1..4  •  Move: ↑/↓/k/j  •  Play: Enter  •  Del: Remove"
+            }
+            _ => "Sources: Ctrl+1..4 (or Alt+1..4)  •  Move: ↑/↓/k/j  •  Play: Enter  •  Del: Remove",
+        },
+        ActivePanel::Library => match source {
+            crate::sources::SourceTab::Local => {
+                "Local Library  •  Navigate: ↑/↓/k/j  •  Expand/Enqueue: Enter  •  Search: /"
+            }
+            crate::sources::SourceTab::Spotify => {
+                "Spotify Library  •  Navigate: ↑/↓/k/j  •  Open/Close/Queue: Enter  •  Search: /"
+            }
+            crate::sources::SourceTab::YouTube => {
+                "YouTube Music  •  Navigate: ↑/↓/k/j  •  Open/Close/Queue: Enter  •  Search: /"
+            }
+            crate::sources::SourceTab::Unified => {
+                "Unified Library  •  Navigate: ↑/↓/k/j  •  Search: /"
+            }
+        },
+        ActivePanel::Search => {
+            "Search Active Source  •  Type query  •  Select: ↑/↓  •  Enqueue: Enter"
+        }
+        ActivePanel::NowPlaying => {
+            "Now Playing  •  Lyrics: m  •  Visualizer: v  •  Sources: Ctrl+1..4"
+        }
+        ActivePanel::Help => "Switch Views: F2-F6 / Tab  •  Sources: Ctrl+1..4  •  Quit: q",
     };
     let widget = Paragraph::new(Line::from(Span::styled(
         text,
@@ -150,7 +170,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),    // Content area
-            Constraint::Length(1), // Footer / tab bar
+            Constraint::Length(2), // Source bar + Footer / tab bar
         ])
         .split(right_area);
 
@@ -198,16 +218,28 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
 
         if let Some(inst_rect) = instructions_area {
-            render_instructions(f, inst_rect, app.active_panel);
+            render_instructions(f, inst_rect, app.active_panel, app.source);
         }
 
         app.ui_bounds.left_panel_rect = Some(tab_area);
-        match app.active_panel {
-            ActivePanel::Queue => draw_queue(f, app, tab_area),
-            ActivePanel::Library => draw_library(f, app, tab_area),
-            ActivePanel::Search => draw_search(f, app, tab_area),
-            ActivePanel::Help => draw_help(f, tab_area),
-            ActivePanel::NowPlaying => unreachable!(),
+        if (app.source == crate::app::SourceTab::Spotify
+            || app.source == crate::app::SourceTab::YouTube)
+            && app.active_panel != ActivePanel::Help
+            && app.active_panel != ActivePanel::Queue
+        {
+            match app.active_panel {
+                ActivePanel::Library => draw_browse(f, app, tab_area),
+                ActivePanel::Search => draw_remote_search(f, app, tab_area),
+                _ => render_empty(f, tab_area, "View not available for this source."),
+            }
+        } else {
+            match app.active_panel {
+                ActivePanel::Queue => draw_queue(f, app, tab_area),
+                ActivePanel::Library => draw_library(f, app, tab_area),
+                ActivePanel::Search => draw_search(f, app, tab_area),
+                ActivePanel::Help => draw_help(f, tab_area),
+                ActivePanel::NowPlaying => unreachable!(),
+            }
         }
     }
 
@@ -257,7 +289,7 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
             .split(area);
 
         branding::render_logo_with_song(f, layout[0], song_name);
-        render_instructions(f, layout[1], ActivePanel::NowPlaying);
+        render_instructions(f, layout[1], ActivePanel::NowPlaying, app.source);
         draw_metadata(f, app, layout[2]);
         draw_lyrics(f, app, layout[4]);
         draw_progress(f, app, layout[6]);
@@ -283,7 +315,7 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     branding::render_logo_with_song(f, layout[0], song_name);
-    render_instructions(f, layout[1], ActivePanel::NowPlaying);
+    render_instructions(f, layout[1], ActivePanel::NowPlaying, app.source);
     draw_metadata(f, app, layout[2]);
     draw_lyrics(f, app, layout[4]);
     draw_visualizer(f, app, layout[6]);
@@ -394,11 +426,18 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
                     lyrics_widget::render_untimed_lyrics(f, area, lines, app.lyrics_scroll);
                 }
                 LyricsKind::None => {
-                    let hint = Paragraph::new(Line::from(Span::styled(
-                        "No Lyrics Available. Press 'm' to go back",
-                        Style::default().fg(C_DIM),
-                    )))
-                    .alignment(ratatui::layout::Alignment::Center);
+                    let msg = if matches!(
+                        entry.id,
+                        crate::data::track::TrackRef::Spotify(_)
+                            | crate::data::track::TrackRef::YouTube(_)
+                    ) {
+                        "Lyrics not available (local files only). Press 'm' to go back"
+                    } else {
+                        "No Lyrics Available. Press 'm' to go back"
+                    };
+                    let hint =
+                        Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(C_DIM))))
+                            .alignment(ratatui::layout::Alignment::Center);
                     f.render_widget(hint, area);
                 }
             }
@@ -469,6 +508,14 @@ fn draw_visualizer(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// Renders a mini volume bar: "▮▮▮▮▮▯▯▯" (8 cells) (Q4)
+fn volume_bar(vol: u8) -> String {
+    const TOTAL: usize = 8;
+    let filled = (((vol as usize) * TOTAL + 50) / 100).min(TOTAL);
+    let empty = TOTAL - filled;
+    format!("{}{}", "▮".repeat(filled), "▯".repeat(empty))
+}
+
 fn draw_progress(f: &mut Frame, app: &mut App, area: Rect) {
     if area.height < 2 {
         app.ui_bounds.progress_bar_rect = None;
@@ -494,21 +541,66 @@ fn draw_progress(f: &mut Frame, app: &mut App, area: Rect) {
         0.0
     };
 
-    // Progress bar (matches width of the centered content above it)
-    let bar_area = Rect::new(active_area.x, active_area.y, active_area.width, 1);
-    app.ui_bounds.progress_bar_rect = Some(bar_area);
-    let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(C_ACCENT2).bg(C_SURFACE))
-        .ratio(ratio)
-        .label("");
-    f.render_widget(gauge, bar_area);
+    let elapsed_str = format_time(elapsed_ms);
+    let total_str = format_time(total_ms);
+
+    if app.buffering {
+        let is_yt = matches!(
+            app.playlist.current_entry().map(|e| &e.id),
+            Some(crate::data::track::TrackRef::YouTube(_))
+        );
+        let label = if is_yt {
+            "downloading…"
+        } else {
+            "buffering…"
+        };
+        let label_w = (label.len() as u16).min(active_area.width);
+        let left_rect = Rect::new(active_area.x, active_area.y, label_w, 1);
+        f.render_widget(
+            Paragraph::new(label).style(Style::default().fg(C_CYAN)),
+            left_rect,
+        );
+        let bar_w = active_area.width.saturating_sub(label_w + 1);
+        let bar_area = Rect::new(active_area.x + label_w + 1, active_area.y, bar_w, 1);
+        app.ui_bounds.progress_bar_rect = Some(bar_area);
+        let gauge = Gauge::default()
+            .gauge_style(Style::default().fg(C_ACCENT2).bg(C_SURFACE))
+            .ratio(0.0)
+            .label("");
+        f.render_widget(gauge, bar_area);
+    } else {
+        // Flank seek bar with timestamps (Q5)
+        let label_w: u16 = 6;
+        let bar_w = active_area.width.saturating_sub(label_w * 2);
+
+        // Left timestamp
+        let left_rect = Rect::new(active_area.x, active_area.y, label_w, 1);
+        f.render_widget(
+            Paragraph::new(format!("{:>5} ", elapsed_str)).style(Style::default().fg(C_DIM)),
+            left_rect,
+        );
+
+        // Progress bar (narrower, between timestamps)
+        let bar_area = Rect::new(active_area.x + label_w, active_area.y, bar_w, 1);
+        app.ui_bounds.progress_bar_rect = Some(bar_area);
+        let gauge = Gauge::default()
+            .gauge_style(Style::default().fg(C_ACCENT2).bg(C_SURFACE))
+            .ratio(ratio)
+            .label("");
+        f.render_widget(gauge, bar_area);
+
+        // Right timestamp
+        let right_rect = Rect::new(active_area.x + label_w + bar_w, active_area.y, label_w, 1);
+        f.render_widget(
+            Paragraph::new(format!(" {}", total_str)).style(Style::default().fg(C_DIM)),
+            right_rect,
+        );
+    }
 
     // Info line
     if active_area.height >= 2 {
         let info_area = Rect::new(active_area.x, active_area.y + 1, active_area.width, 1);
 
-        let elapsed_str = format_time(elapsed_ms);
-        let total_str = format_time(total_ms);
         let pct = (ratio * 100.0) as u32;
         let vol = app.player.as_ref().map(|p| p.volume()).unwrap_or(100);
         let repeat = app.playlist.repeat.symbol();
@@ -526,9 +618,10 @@ fn draw_progress(f: &mut Frame, app: &mut App, area: Rect) {
             .map(|b| format!("{}kbps", b))
             .unwrap_or_default();
 
+        let vol_bar = volume_bar(vol);
         let info = format!(
-            "{} {}/{} ({}%)  Vol:{}% {} {} {}",
-            status, elapsed_str, total_str, pct, vol, repeat, shuffle, bitrate_str
+            "{} {}/{} ({}%)  {} {}%  {} {} {}",
+            status, elapsed_str, total_str, pct, vol_bar, vol, repeat, shuffle, bitrate_str
         );
 
         let widget = Paragraph::new(Line::from(Span::styled(info, Style::default().fg(C_DIM))))
@@ -553,12 +646,41 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // Queue summary header (Q2)
+    let mut list_area = area;
+    if area.height >= 2 {
+        let total_secs = app.playlist.total_duration_secs();
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        let duration_str = if hours > 0 {
+            format!("{}h {}m", hours, mins)
+        } else {
+            format!("{} min", mins)
+        };
+        let n = app.playlist.len();
+        let summary = format!(
+            "  {} {}  ·  {}",
+            n,
+            if n == 1 { "track" } else { "tracks" },
+            duration_str
+        );
+        let summary_area = Rect::new(area.x, area.y, area.width, 1);
+        let header_line = Line::from(Span::styled(summary, Style::default().fg(C_DIM)));
+        f.render_widget(Paragraph::new(header_line), summary_area);
+        list_area = Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(1),
+        );
+    }
+
     let visual_items = app
         .playlist
         .get_visual_items(app.show_folders, app.config.strip_track_numbers);
     let playing_real = app.playlist.current_real_index();
 
-    let visible_height = area.height as usize;
+    let visible_height = list_area.height as usize;
     let half = visible_height / 2;
 
     // Find the visual index corresponding to app.queue_cursor
@@ -605,15 +727,7 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
                 let is_cursor = *entry_idx == app.queue_cursor;
                 let prefix = if is_playing { "▶ " } else { "  " };
 
-                let style = if is_playing && is_cursor {
-                    Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)
-                } else if is_playing {
-                    Style::default().fg(C_GREEN)
-                } else if is_cursor {
-                    Style::default().fg(C_FG).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(C_DIM)
-                };
+                let style = row_style(is_cursor, is_playing);
 
                 display_lines.push(Line::from(vec![
                     Span::styled("  ", style),
@@ -625,22 +739,15 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let widget = Paragraph::new(display_lines).alignment(ratatui::layout::Alignment::Left);
-    f.render_widget(widget, area);
+    f.render_widget(widget, list_area);
 
     // Render vertical scrollbar if list exceeds visible height
     if visual_items.len() > visible_height {
-        let scrollbar_col = area.x + area.width.saturating_sub(1);
-        app.ui_bounds.scrollbar_rect = Some(Rect::new(scrollbar_col, area.y, 1, area.height));
+        let scrollbar_col = list_area.x + list_area.width.saturating_sub(1);
+        app.ui_bounds.scrollbar_rect =
+            Some(Rect::new(scrollbar_col, list_area.y, 1, list_area.height));
 
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_symbol("█")
-            .track_symbol(None)
-            .begin_symbol(None)
-            .end_symbol(None)
-            .thumb_style(Style::default().fg(C_ACCENT2));
-        let mut scrollbar_state =
-            ScrollbarState::new(visual_items.len().saturating_sub(visible_height)).position(start);
-        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        render_scrollbar(f, list_area, visual_items.len(), visible_height, start);
     }
 }
 
@@ -683,7 +790,9 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
     // Determine enqueued status of the entire library using pre-calculated set
     let all_enqueued = app.flat_library.iter().all(|item| {
         if let LibraryEntry::Track { path, .. } = &item.entry {
-            app.playlist.entry_paths.contains(path)
+            app.playlist
+                .entry_ids
+                .contains(&crate::data::track::TrackRef::Local(path.clone()))
         } else {
             true
         }
@@ -801,13 +910,24 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Search input line (Centered)
+    // Search input line with match counter (Q3) (Centered)
     let input_area = Rect::new(area.x, area.y, area.width, 1);
     let cursor = if app.searching { "█" } else { "" };
+    let count_span = if app.search_query.is_empty() {
+        Span::raw("")
+    } else if app.search_results.is_empty() {
+        Span::styled("  no results", Style::default().fg(C_RED))
+    } else {
+        Span::styled(
+            format!("  {} results", app.search_results.len()),
+            Style::default().fg(C_DIM),
+        )
+    };
     let input_line = Line::from(vec![
         Span::styled("Search: ", Style::default().fg(C_ACCENT)),
         Span::styled(&app.search_query, Style::default().fg(C_FG)),
         Span::styled(cursor, Style::default().fg(C_ACCENT2)),
+        count_span,
     ]);
     let input_widget = Paragraph::new(input_line).alignment(ratatui::layout::Alignment::Center);
     f.render_widget(input_widget, input_area);
@@ -861,16 +981,324 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
             results_area.height,
         ));
 
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_symbol("█")
-            .track_symbol(None)
-            .begin_symbol(None)
-            .end_symbol(None)
-            .thumb_style(Style::default().fg(C_ACCENT2));
-        let mut scrollbar_state =
-            ScrollbarState::new(app.search_results.len().saturating_sub(results_height))
-                .position(start);
-        f.render_stateful_widget(scrollbar, results_area, &mut scrollbar_state);
+        render_scrollbar(
+            f,
+            results_area,
+            app.search_results.len(),
+            results_height,
+            start,
+        );
+    }
+}
+
+/// One row of a remote library tree or search result list, drawn like the local
+/// library: enqueued marker, indentation by depth, folder/track icon, title, subtitle.
+fn browse_row<'a>(
+    item: &'a crate::sources::BrowseItem,
+    is_cursor: bool,
+    expanded: &std::collections::HashSet<String>,
+    playlist: &crate::data::playlist::Playlist,
+    width: usize,
+) -> Line<'a> {
+    let is_playing = item
+        .track_ref
+        .as_ref()
+        .is_some_and(|tr| playlist.current_entry().map(|e| &e.id) == Some(tr));
+    let enqueued = item
+        .track_ref
+        .as_ref()
+        .is_some_and(|tr| playlist.entry_ids.contains(tr));
+
+    let style = if item.is_container {
+        let s = Style::default().fg(C_CYAN);
+        if is_cursor {
+            s.add_modifier(Modifier::BOLD)
+        } else {
+            s
+        }
+    } else {
+        row_style(is_cursor, is_playing)
+    };
+    let icon = if item.is_container {
+        if expanded.contains(&item.id) {
+            "▼ 📁 "
+        } else {
+            "▶ 📁 "
+        }
+    } else if is_playing {
+        "▶  "
+    } else {
+        "♪  "
+    };
+    let marker = if enqueued { "  * " } else { "    " };
+    let indent = "    ".repeat(item.depth);
+
+    // The title has priority; the subtitle only uses what is left of the row.
+    // marker (4) + indent + icon (5 cells) + scrollbar column
+    let title_room = width.saturating_sub(4 + indent.len() + 5 + 1);
+    let title = truncate_to_width(&item.title, title_room);
+    let sub_room = title_room
+        .saturating_sub(unicode_width::UnicodeWidthStr::width(title) + 3)
+        .min(20);
+    let sub = if sub_room >= 4 {
+        truncate_to_width(item.subtitle.as_deref().unwrap_or(""), sub_room)
+    } else {
+        ""
+    };
+
+    Line::from(vec![
+        Span::styled(marker, style),
+        Span::styled(indent, style),
+        Span::styled(icon, style),
+        Span::styled(title, style),
+        Span::styled(
+            if sub.is_empty() { "" } else { " • " },
+            Style::default().fg(C_DIM),
+        ),
+        Span::styled(sub, Style::default().fg(C_DIM)),
+    ])
+}
+
+// ─── Remote Browse View (Spotify / YouTube) ─────────────────────────────────
+fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
+    if area.width < 5 || area.height < 1 {
+        return;
+    }
+
+    let source_name = match app.source {
+        crate::app::SourceTab::Spotify => "Spotify",
+        crate::app::SourceTab::YouTube => "YouTube Music",
+        _ => "Remote",
+    };
+
+    let view = match app.active_source_view() {
+        Some(v) => v.clone(),
+        None => return,
+    };
+
+    if !view.connected {
+        let mut lines = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format!("{} Source", source_name),
+                    Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  Status: ", Style::default().fg(C_DIM)),
+                Span::styled(
+                    "Not connected. Press Enter to sign in.",
+                    Style::default().fg(C_RED),
+                ),
+            ]),
+            Line::from(""),
+        ];
+
+        match app.source {
+            crate::app::SourceTab::Spotify => {
+                lines.push(Line::from(Span::styled(
+                    "  • Requires Spotify Premium account.",
+                    Style::default().fg(C_FG),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "  • Requires personal Spotify Client ID.",
+                    Style::default().fg(C_FG),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "  • Press Enter to configure Client ID / authorize via PKCE.",
+                    Style::default().fg(C_DIM),
+                )));
+            }
+            crate::app::SourceTab::YouTube => {
+                lines.push(Line::from(Span::styled(
+                    "  • Requires Cookie header from music.youtube.com.",
+                    Style::default().fg(C_FG),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "  • Paste cookie or credentials to connect.",
+                    Style::default().fg(C_FG),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "  • Press Enter to paste cookie header.",
+                    Style::default().fg(C_DIM),
+                )));
+            }
+            _ => {}
+        }
+
+        if let Some(ref err) = view.error {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  Error: ", Style::default().fg(C_RED)),
+                Span::styled(err.as_str(), Style::default().fg(C_RED)),
+            ]));
+        }
+
+        if view.awaiting_login_input {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "  Credentials: ",
+                    Style::default().fg(C_ACCENT2).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(view.login_input.as_str(), Style::default().fg(C_FG)),
+                Span::styled("█", Style::default().fg(C_ACCENT2)),
+            ]));
+        }
+
+        let widget = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Left);
+        f.render_widget(widget, area);
+        return;
+    }
+
+    if view.loading {
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("  Loading {}...", source_name),
+                Style::default().fg(C_ACCENT2).add_modifier(Modifier::BOLD),
+            )),
+        ];
+        let widget = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Left);
+        f.render_widget(widget, area);
+        return;
+    }
+
+    if view.flat.is_empty() {
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("  No items found in {} library.", source_name),
+                Style::default().fg(C_DIM),
+            )),
+            Line::from(Span::styled(
+                "  Press F5 to switch to Search.",
+                Style::default().fg(C_DIM),
+            )),
+        ];
+        let widget = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Left);
+        f.render_widget(widget, area);
+        return;
+    }
+
+    let visible_height = area.height as usize;
+    let (start, end) = scroll_offset(view.cursor, view.flat.len(), visible_height);
+    let mut display_lines = Vec::new();
+
+    for (idx, item) in view.flat[start..end].iter().enumerate() {
+        display_lines.push(browse_row(
+            item,
+            start + idx == view.cursor,
+            &view.expanded,
+            &app.playlist,
+            area.width as usize,
+        ));
+    }
+
+    let widget = Paragraph::new(display_lines).alignment(ratatui::layout::Alignment::Left);
+    f.render_widget(widget, area);
+
+    if view.flat.len() > visible_height {
+        render_scrollbar(f, area, view.flat.len(), visible_height, start);
+    }
+}
+
+// ─── Remote Search View (Spotify / YouTube) ─────────────────────────────────
+fn draw_remote_search(f: &mut Frame, app: &mut App, area: Rect) {
+    if area.width < 5 || area.height < 2 {
+        return;
+    }
+
+    let source_name = match app.source {
+        crate::app::SourceTab::Spotify => "Spotify",
+        crate::app::SourceTab::YouTube => "YouTube Music",
+        _ => "Remote",
+    };
+
+    let view = match app.active_source_view() {
+        Some(v) => v.clone(),
+        None => return,
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    let prompt = format!("  Search {}: ", source_name);
+    render_input_line(
+        f,
+        chunks[0],
+        &prompt,
+        &view.search_query,
+        app.searching,
+        ratatui::layout::Alignment::Left,
+    );
+
+    let count_line = if view.loading {
+        format!("  Searching {}...", source_name)
+    } else {
+        format!("  {} results", view.search_results.len())
+    };
+    let count_widget = Paragraph::new(Line::from(Span::styled(
+        count_line,
+        Style::default().fg(C_DIM),
+    )))
+    .alignment(ratatui::layout::Alignment::Left);
+    f.render_widget(count_widget, chunks[1]);
+
+    let list_area = chunks[2];
+    if list_area.height < 1 {
+        return;
+    }
+
+    if view.search_results.is_empty() {
+        if !view.loading && !view.search_query.is_empty() {
+            let empty_hint = Paragraph::new(Line::from(Span::styled(
+                "  No results found.",
+                Style::default().fg(C_DIM),
+            )))
+            .alignment(ratatui::layout::Alignment::Left);
+            f.render_widget(empty_hint, list_area);
+        }
+        return;
+    }
+
+    let visible_height = list_area.height as usize;
+    let (start, end) = scroll_offset(
+        view.search_cursor,
+        view.search_results.len(),
+        visible_height,
+    );
+    let mut display_lines = Vec::new();
+
+    for (idx, item) in view.search_results[start..end].iter().enumerate() {
+        display_lines.push(browse_row(
+            item,
+            start + idx == view.search_cursor,
+            &view.expanded,
+            &app.playlist,
+            list_area.width as usize,
+        ));
+    }
+
+    let widget = Paragraph::new(display_lines).alignment(ratatui::layout::Alignment::Left);
+    f.render_widget(widget, list_area);
+
+    if view.search_results.len() > visible_height {
+        render_scrollbar(
+            f,
+            list_area,
+            view.search_results.len(),
+            visible_height,
+            start,
+        );
     }
 }
 
@@ -917,9 +1345,72 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("q / Esc", Style::default().fg(C_CYAN)),
-            Span::styled("      •  ", Style::default().fg(C_DIM)),
+            Span::styled("q / Ctrl+C", Style::default().fg(C_CYAN)),
+            Span::styled("   •  ", Style::default().fg(C_DIM)),
             Span::styled("Quit application", Style::default().fg(C_FG)),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Esc", Style::default().fg(C_CYAN)),
+            Span::styled("          •  ", Style::default().fg(C_DIM)),
+            Span::styled("Back to the queue view", Style::default().fg(C_FG)),
+        ]),
+        Line::from(""),
+        // Music Sources (Streaming & Local)
+        Line::from(Span::styled(
+            "  ── Music Sources (Local / Spotify / YouTube) ──",
+            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Ctrl+1 / Alt+1", Style::default().fg(C_CYAN)),
+            Span::styled(" •  ", Style::default().fg(C_DIM)),
+            Span::styled("Switch to Local Library source", Style::default().fg(C_FG)),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Ctrl+2 / Alt+2", Style::default().fg(C_CYAN)),
+            Span::styled(" •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Switch to Spotify source (requires Premium & Client ID)",
+                Style::default().fg(C_FG),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Ctrl+3 / Alt+3", Style::default().fg(C_CYAN)),
+            Span::styled(" •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Switch to YouTube Music source (stream via yt-dlp)",
+                Style::default().fg(C_FG),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Ctrl+4 / Alt+4", Style::default().fg(C_CYAN)),
+            Span::styled(" •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Switch to Unified Queue (mix tracks from any source)",
+                Style::default().fg(C_FG),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Credentials", Style::default().fg(C_CYAN)),
+            Span::styled("    •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Config stored in ~/.config/mixed/credentials.json",
+                Style::default().fg(C_FG),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Remote Lyrics", Style::default().fg(C_CYAN)),
+            Span::styled("  •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Lyrics view is local-only; remote tracks display notice",
+                Style::default().fg(C_FG),
+            ),
         ]),
         Line::from(""),
         // Playback Controls
@@ -1008,6 +1499,15 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Span::styled("  •  ", Style::default().fg(C_DIM)),
             Span::styled(
                 "Enqueue selected item and play immediately",
+                Style::default().fg(C_FG),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Shift+Enter", Style::default().fg(C_CYAN)),
+            Span::styled("•  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Enqueue selected track to play next",
                 Style::default().fg(C_FG),
             ),
         ]),
@@ -1148,13 +1648,13 @@ fn draw_dir_input(f: &mut Frame, app: &App, area: Rect) {
         branding::render_logo(f, logo_area);
     }
 
-    let text_height = 4.min(
+    let text_height = 6.min(
         inner_area
             .height
             .saturating_sub(content_y.saturating_sub(inner_area.y)),
     );
     let text_area = Rect::new(inner_area.x, content_y, inner_area.width, text_height);
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             "Welcome to mixed!",
             Style::default().fg(C_FG).add_modifier(Modifier::BOLD),
@@ -1170,52 +1670,151 @@ fn draw_dir_input(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("█", Style::default().fg(C_ACCENT2)),
         ]),
     ];
+    if let Some(ref msg) = app.status_msg {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            msg.as_str(),
+            Style::default().fg(C_RED),
+        )));
+    }
     let widget = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
     f.render_widget(widget, text_area);
 }
 
 // ─── Footer Tab Bar ────────────────────────────────────────────────────────
 fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
-    app.ui_bounds.footer_tabs_rect = Some(area);
-    let tabs = [
-        ("F2", "Playlist", ActivePanel::Queue),
-        ("F3", "Library", ActivePanel::Library),
-        ("F4", "Track", ActivePanel::NowPlaying),
-        ("F5", "Search", ActivePanel::Search),
-        ("F6", "Help", ActivePanel::Help),
-    ];
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
 
-    let mut spans = Vec::new();
-    for (i, (key, label, panel)) in tabs.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" | ", Style::default().fg(C_DIM)));
-        }
-        let style = if *panel == app.active_panel {
-            Style::default().fg(C_ACCENT2).add_modifier(Modifier::BOLD)
+    if area.height >= 2 {
+        let footer_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Source bar or status message
+                Constraint::Length(1), // F-key tabs bar
+            ])
+            .split(area);
+
+        let source_area = footer_layout[0];
+        let tabs_area = footer_layout[1];
+        app.ui_bounds.footer_source_rect = Some(source_area);
+        app.ui_bounds.footer_tabs_rect = Some(tabs_area);
+
+        // Row 0: Status message if present, otherwise Source switcher tabs
+        if let Some(ref msg) = app.status_msg {
+            let colour = if msg.starts_with("Error")
+                || msg.starts_with("Failed")
+                || msg.starts_with("Invalid")
+            {
+                C_RED
+            } else {
+                C_ACCENT
+            };
+            let line = Line::from(vec![
+                Span::styled("  ● ", Style::default().fg(colour)),
+                Span::styled(msg.as_str(), Style::default().fg(C_FG)),
+            ]);
+            let widget = Paragraph::new(line).alignment(ratatui::layout::Alignment::Left);
+            f.render_widget(widget, source_area);
         } else {
-            Style::default().fg(C_DIM)
+            let mut spans = Vec::new();
+            for (i, tab) in crate::app::SourceTab::ALL.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled("  ·  ", Style::default().fg(C_DIM)));
+                }
+                let style = if *tab == app.source {
+                    Style::default()
+                        .fg(accent_for(*tab))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(C_DIM)
+                };
+                spans.push(Span::styled(tab.label(), style));
+            }
+            let line = Line::from(spans);
+            let widget = Paragraph::new(line).alignment(ratatui::layout::Alignment::Center);
+            f.render_widget(widget, source_area);
+        }
+
+        // Row 1: F-key tabs bar
+        let tabs = crate::app::tabs_for(app.source);
+        let mut spans = Vec::new();
+        for (i, (key, label, panel)) in tabs.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" | ", Style::default().fg(C_DIM)));
+            }
+            let style = if *panel == app.active_panel {
+                Style::default()
+                    .fg(accent_for(app.source))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C_DIM)
+            };
+            spans.push(Span::styled(format!("{} {}", key, label), style));
+        }
+
+        // Play/Pause icon
+        let status_icon = if app.player.as_ref().map(|p| p.is_paused()).unwrap_or(false) {
+            "⏸"
+        } else {
+            "▶"
         };
-        spans.push(Span::styled(format!("{} {}", key, label), style));
-    }
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            status_icon,
+            Style::default().fg(accent_for(app.source)),
+        ));
 
-    // Play/Pause icon
-    let status_icon = if app.player.as_ref().map(|p| p.is_paused()).unwrap_or(false) {
-        "⏸"
+        // Shuffle icon
+        if app.playlist.shuffle {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled("⤨", Style::default().fg(C_ACCENT2)));
+        }
+
+        let line = Line::from(spans);
+        let widget = Paragraph::new(line).alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(widget, tabs_area);
     } else {
-        "▶"
-    };
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(status_icon, Style::default().fg(C_ACCENT)));
+        // Fallback for single-row footer (extremely constrained terminals)
+        app.ui_bounds.footer_tabs_rect = Some(area);
+        if let Some(ref msg) = app.status_msg {
+            let colour = if msg.starts_with("Error")
+                || msg.starts_with("Failed")
+                || msg.starts_with("Invalid")
+            {
+                C_RED
+            } else {
+                C_ACCENT
+            };
+            let line = Line::from(vec![
+                Span::styled("  ● ", Style::default().fg(colour)),
+                Span::styled(msg.as_str(), Style::default().fg(C_FG)),
+            ]);
+            let widget = Paragraph::new(line).alignment(ratatui::layout::Alignment::Left);
+            f.render_widget(widget, area);
+            return;
+        }
 
-    // Shuffle icon
-    if app.playlist.shuffle {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled("⤨", Style::default().fg(C_ACCENT2)));
+        let tabs = crate::app::tabs_for(app.source);
+        let mut spans = Vec::new();
+        for (i, (key, label, panel)) in tabs.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" | ", Style::default().fg(C_DIM)));
+            }
+            let style = if *panel == app.active_panel {
+                Style::default()
+                    .fg(accent_for(app.source))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C_DIM)
+            };
+            spans.push(Span::styled(format!("{} {}", key, label), style));
+        }
+        let line = Line::from(spans);
+        let widget = Paragraph::new(line).alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(widget, area);
     }
-
-    let line = Line::from(spans);
-    let widget = Paragraph::new(line).alignment(ratatui::layout::Alignment::Center);
-    f.render_widget(widget, area);
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

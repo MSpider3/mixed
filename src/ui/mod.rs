@@ -3,4 +3,6 @@ pub mod branding;
 pub mod events;
 pub mod layout;
 pub mod lyrics_widget;
+pub mod theme;
 pub mod visualizer_widget;
+pub mod widgets;

@@ -27,6 +27,7 @@ rustfft = "6"
 
 # DSP / Visualization
 crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
 
 # Metadata / Tags
 lofty = "0.22"
@@ -54,6 +55,25 @@ regex = "1"
 
 # Parallel iterators for library scanning
 rayon = "1"
+# Async Network Runtime
+tokio = { version = "1", features = ["rt-multi-thread", "net", "process", "fs", "io-util", "macros", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+ytmapi-rs = { version = "0.3", optional = true }
+librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
+librespot-playback = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
+librespot-oauth = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
+librespot-metadata = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
+
+rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
+
+[features]
+default = ["spotify", "youtube"]
+spotify = ["dep:reqwest", "dep:librespot-core", "dep:librespot-playback", "dep:librespot-oauth", "dep:librespot-metadata", "dep:rustls"]
+youtube = ["dep:reqwest", "dep:ytmapi-rs"]
+
+[[example]]
+name = "spike_spotify"
+required-features = ["spotify"]
 
 [profile.release]
 opt-level = 3
@@ -66,4 +86,4 @@ strip = true
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 enumflags2 = "0.7"
-tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+

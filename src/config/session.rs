@@ -2,30 +2,45 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::data::playlist::RepeatMode;
+use crate::data::playlist::{PlaylistEntry, RepeatMode};
 
 /// Persistent session state saved on exit, restored on launch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
-    /// List of file paths in the queue.
+    /// Full playlist entries with metadata and source-neutral track IDs.
+    #[serde(default)]
+    pub queue: Vec<PlaylistEntry>,
+    /// List of file paths in the queue (legacy format, preserved for backwards compatibility).
+    #[serde(default)]
     pub playlist_paths: Vec<PathBuf>,
     /// Index of the currently playing track.
+    #[serde(default)]
     pub current_index: usize,
     /// Playback position in milliseconds.
+    #[serde(default)]
     pub position_ms: u64,
     /// Whether playback was active when the session was saved.
+    #[serde(default)]
     pub was_playing: bool,
     /// Volume at save time.
+    #[serde(default = "default_volume")]
     pub volume: u8,
     /// Repeat mode.
+    #[serde(default)]
     pub repeat_mode: RepeatMode,
     /// Shuffle state.
+    #[serde(default)]
     pub shuffle: bool,
+}
+
+fn default_volume() -> u8 {
+    80
 }
 
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            queue: Vec::new(),
             playlist_paths: Vec::new(),
             current_index: 0,
             position_ms: 0,

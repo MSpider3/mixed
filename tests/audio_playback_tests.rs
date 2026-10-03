@@ -334,3 +334,56 @@ fn test_symphonia_source_optional_external_file() {
         }
     }
 }
+
+#[test]
+fn test_symphonia_source_decodes_file_while_it_is_still_being_written() {
+    use mixed::audio::growing_file::DownloadProgress;
+    use std::sync::atomic::AtomicBool;
+
+    let complete = create_synthetic_wav(44100, 2, 1.0);
+    let bytes = std::fs::read(&complete).unwrap();
+    let expected = SymphoniaSource::open_file(complete.to_str().unwrap())
+        .unwrap()
+        .count();
+    assert!(expected > 0);
+
+    // Simulate a downloader: the header and first chunk exist, the rest trickles in.
+    let part = complete.with_file_name(format!("mixed_growing_{}.wav.part", std::process::id()));
+    let first = 16 * 1024;
+    std::fs::write(&part, &bytes[..first]).unwrap();
+
+    let progress = Arc::new(DownloadProgress::default());
+    let writer_progress = progress.clone();
+    let writer_part = part.clone();
+    let rest = bytes[first..].to_vec();
+    let writer = std::thread::spawn(move || {
+        let mut out = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&writer_part)
+            .unwrap();
+        for chunk in rest.chunks(32 * 1024) {
+            std::thread::sleep(Duration::from_millis(30));
+            out.write_all(chunk).unwrap();
+            out.flush().unwrap();
+        }
+        writer_progress.finish(true);
+    });
+
+    let source =
+        SymphoniaSource::open_growing(&part, progress.clone(), Arc::new(AtomicBool::new(false)))
+            .expect("partial file must open before the download completes");
+    assert!(
+        !progress.is_done(),
+        "decoding must start while the download is still running"
+    );
+    let decoded = source.count();
+    writer.join().unwrap();
+
+    assert_eq!(
+        decoded, expected,
+        "progressive decode must yield every sample of the finished file"
+    );
+
+    let _ = std::fs::remove_file(&part);
+    let _ = std::fs::remove_file(&complete);
+}

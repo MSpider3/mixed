@@ -13,6 +13,7 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 
 /// A single entry in the music library tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum LibraryEntry {
     Directory {
         name: String,
@@ -69,8 +70,13 @@ impl LibraryEntry {
         }
     }
 
-    /// Returns all tracks (path and metadata) under this entry recursively.
-    pub fn get_all_tracks(&self) -> Vec<(PathBuf, crate::data::metadata::TrackMetadata)> {
+    /// Returns all tracks (TrackRef and metadata) under this entry recursively.
+    pub fn get_all_tracks(
+        &self,
+    ) -> Vec<(
+        crate::data::track::TrackRef,
+        crate::data::metadata::TrackMetadata,
+    )> {
         let mut tracks = Vec::new();
         self.collect_tracks_recursive(&mut tracks);
         tracks
@@ -78,11 +84,17 @@ impl LibraryEntry {
 
     fn collect_tracks_recursive(
         &self,
-        tracks: &mut Vec<(PathBuf, crate::data::metadata::TrackMetadata)>,
+        tracks: &mut Vec<(
+            crate::data::track::TrackRef,
+            crate::data::metadata::TrackMetadata,
+        )>,
     ) {
         match self {
             LibraryEntry::Track { path, metadata, .. } => {
-                tracks.push((path.clone(), metadata.clone()));
+                tracks.push((
+                    crate::data::track::TrackRef::Local(path.clone()),
+                    metadata.clone(),
+                ));
             }
             LibraryEntry::Directory { children, .. } => {
                 for child in children {
@@ -92,25 +104,29 @@ impl LibraryEntry {
         }
     }
 
-    /// True if ALL audio tracks under this entry are present in `entry_paths`.
+    /// True if ALL audio tracks under this entry are present in `entry_ids`.
     /// Used by the flat-library builder to pre-cache enqueue status, avoiding
     /// per-frame recursive tree walks in the render loop.
-    pub fn all_tracks_enqueued(&self, entry_paths: &HashSet<PathBuf>) -> bool {
+    pub fn all_tracks_enqueued(&self, entry_ids: &HashSet<crate::data::track::TrackRef>) -> bool {
         match self {
-            LibraryEntry::Track { path, .. } => entry_paths.contains(path),
+            LibraryEntry::Track { path, .. } => {
+                entry_ids.contains(&crate::data::track::TrackRef::Local(path.clone()))
+            }
             LibraryEntry::Directory { children, .. } => {
                 let mut has_track = false;
                 for child in children {
                     match child {
                         LibraryEntry::Track { path, .. } => {
                             has_track = true;
-                            if !entry_paths.contains(path) {
+                            if !entry_ids
+                                .contains(&crate::data::track::TrackRef::Local(path.clone()))
+                            {
                                 return false;
                             }
                         }
                         LibraryEntry::Directory { .. } => {
                             has_track = true;
-                            if !child.all_tracks_enqueued(entry_paths) {
+                            if !child.all_tracks_enqueued(entry_ids) {
                                 return false;
                             }
                         }
@@ -293,7 +309,7 @@ pub fn flatten_library(
     depth: usize,
     ancestor_last: Vec<bool>,
     collapsed_dirs: &HashSet<PathBuf>,
-    entry_paths: &HashSet<PathBuf>,
+    entry_ids: &HashSet<crate::data::track::TrackRef>,
 ) -> Vec<FlatLibraryItem> {
     let mut result = Vec::new();
     let len = entries.len();
@@ -303,7 +319,7 @@ pub fn flatten_library(
 
         // Pre-compute enqueue status — O(N_tracks_in_subtree) but only during
         // rebuild (on library/playlist change), not on every render frame.
-        let enqueued = entry.all_tracks_enqueued(entry_paths);
+        let enqueued = entry.all_tracks_enqueued(entry_ids);
 
         result.push(FlatLibraryItem {
             entry: entry.clone(),
@@ -321,7 +337,7 @@ pub fn flatten_library(
                     depth + 1,
                     current_ancestors,
                     collapsed_dirs,
-                    entry_paths,
+                    entry_ids,
                 ));
             }
         }

@@ -3,10 +3,14 @@ use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{
-        self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
+        self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+        Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
@@ -18,6 +22,9 @@ use mixed::ui::events;
 use mixed::ui::layout;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "spotify")]
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Parse CLI options before any terminal setup or audio redirection
     let cli_action = mixed::cli::CliOptions::parse(std::env::args());
     let cli_opts = match cli_action {
@@ -37,10 +44,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         silence_alsa();
     }
 
+    // Redirect stderr to log file before entering raw mode (B4)
+    if std::env::var("MIXED_DEBUG").is_err() {
+        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "mixed", "mixed") {
+            let log_dir = proj_dirs.cache_dir();
+            let _ = std::fs::create_dir_all(log_dir);
+            let log_path = log_dir.join("mixed.log");
+            if let Ok(meta) = std::fs::metadata(&log_path) {
+                if meta.len() > 5 * 1024 * 1024 {
+                    let old_log = log_dir.join("mixed.log.1");
+                    let _ = std::fs::rename(&log_path, old_log);
+                }
+            }
+            if let Ok(log_file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::io::AsRawFd;
+                    unsafe {
+                        libc::dup2(log_file.as_raw_fd(), 2);
+                    }
+                }
+            }
+        }
+    }
+
+    let keyboard_enhanced = supports_keyboard_enhancement().unwrap_or(false);
+
     // Install panic hook BEFORE raw mode so any crash restores the terminal cleanly.
     // Without this, a panic leaves raw mode active and the cursor hidden.
     let original_hook = std::panic::take_hook();
+    let main_thread = std::thread::current().id();
     std::panic::set_hook(Box::new(move |info| {
+        // A panic on a worker thread (audio, network, MPRIS) does not end the app,
+        // so the terminal must stay in TUI mode; the report goes to the log only.
+        if std::thread::current().id() != main_thread {
+            original_hook(info);
+            return;
+        }
+        if keyboard_enhanced {
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::event::PopKeyboardEnhancementFlags
+            );
+        }
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(
             std::io::stdout(),
@@ -48,6 +98,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             crossterm::event::DisableMouseCapture,
             crossterm::cursor::Show, // restore cursor visibility
         );
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "\n{}", info);
+        let _ = std::io::stdout().flush();
         original_hook(info);
     }));
 
@@ -68,6 +121,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         EnableMouseCapture,
         EnableFocusChange
     )?;
+    if keyboard_enhanced {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -119,19 +178,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Track state to trigger terminal clears (prevent Sixel / visualizer / view ghosting)
     let mut last_panel = app.active_panel;
-    let mut last_track_path = app.playlist.current_entry().map(|e| e.path.clone());
+    let mut last_source = app.source;
+    let mut last_track_id = app.playlist.current_entry().map(|e| e.id.clone());
     let mut last_show_full_lyrics = app.show_full_lyrics;
     let mut last_vis_mode = app.visualizer_mode;
 
     let never_rx = crossbeam_channel::never::<Vec<LibraryEntry>>();
     let never_player_rx = crossbeam_channel::never::<mixed::audio::player::Player>();
+    let never_player_event_rx = crossbeam_channel::never::<mixed::audio::player::PlayerEvent>();
+    let never_source_event_rx = crossbeam_channel::never::<mixed::sources::SourceEvent>();
+
+    // Spawn async network runtime for remote sources
+    let source_runtime = std::sync::Arc::new(
+        mixed::sources::runtime::SourceRuntime::spawn_with_config(&app.config),
+    );
+    app.init_source_runtime(source_runtime);
     // Before the player arrives vis_wake_rx is the live channel; we always select on it.
     // After player init it stays live — the FFT thread keeps sending.
 
     while running.load(std::sync::atomic::Ordering::Relaxed) {
         // Clear terminal to wipe old Sixel graphic layers and visualizer bars if view state changed
         let current_panel = app.active_panel;
-        let current_track_path = app.playlist.current_entry().map(|e| &e.path);
+        let current_source = app.source;
+        let current_track_id = app.playlist.current_entry().map(|e| &e.id);
         let current_show_full_lyrics = app.show_full_lyrics;
         let current_vis_mode = app.visualizer_mode;
         let mut force_clear = false;
@@ -140,9 +209,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             force_clear = true;
             last_panel = current_panel;
         }
-        if current_track_path != last_track_path.as_ref() {
+        if current_source != last_source {
             force_clear = true;
-            last_track_path = current_track_path.cloned();
+            last_source = current_source;
+        }
+        if current_track_id != last_track_id.as_ref() {
+            force_clear = true;
+            last_track_id = current_track_id.cloned();
         }
         if current_show_full_lyrics != last_show_full_lyrics {
             force_clear = true;
@@ -166,6 +239,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let lib_rx = app.library_rx.as_ref().unwrap_or(&never_rx);
         let player_rx = app.player_rx.as_ref().unwrap_or(&never_player_rx);
+        let player_event_rx = app
+            .player_event_rx
+            .as_ref()
+            .unwrap_or(&never_player_event_rx);
+        let source_event_rx = app
+            .source_event_rx
+            .as_ref()
+            .unwrap_or(&never_source_event_rx);
 
         crossbeam_channel::select! {
             recv(player_rx) -> player_res => {
@@ -186,6 +267,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.load_session();
                     }
                     app.refresh_needed = true;
+                }
+            }
+            recv(player_event_rx) -> pe => {
+                if let Ok(event) = pe {
+                    app.handle_player_event(event);
+                }
+            }
+            recv(source_event_rx) -> se => {
+                if let Ok(event) = se {
+                    app.handle_source_event(event);
                 }
             }
             recv(event_rx) -> ev => {
@@ -334,6 +425,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.refresh_needed = true;
             }
         }
+
+        if let Some((ref query, instant)) = app.remote_search_pending {
+            if instant.elapsed() >= Duration::from_millis(300) {
+                let q = query.clone();
+                app.remote_search_pending = None;
+                app.dispatch_remote_search(q);
+            }
+        }
     }
 
     // Save state before exit
@@ -358,6 +457,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Restore terminal
+    if keyboard_enhanced {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),

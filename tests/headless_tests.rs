@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use mixed::app::{ActivePanel, App};
@@ -601,4 +602,1135 @@ fn test_logical_edge_cases_and_navigation() {
         app.library_cursor, 0,
         "rebuild_flat_library_view must clamp library_cursor to flat_library.len()"
     );
+}
+
+#[test]
+fn test_status_msg_rendering_and_auto_dismiss() {
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    app.awaiting_dir_input = false;
+    app.player_loading = false;
+
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    app.set_status("Error: File not found");
+    assert!(app.status_msg.is_some());
+
+    // Draw and verify status message is rendered
+    terminal.draw(|f| layout::draw(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
+    assert!(content.contains("File not found"));
+
+    // Simulate elapsed time >= 3 seconds
+    app.status_msg_at = Some(std::time::Instant::now() - Duration::from_secs(4));
+    app.tick();
+    assert!(app.status_msg.is_none());
+}
+
+fn create_mod_key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::empty(),
+    }
+}
+
+#[test]
+fn test_source_tab_switching_and_panel_memory() {
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    app.awaiting_dir_input = false;
+    app.player_loading = false;
+
+    assert_eq!(app.source, mixed::app::SourceTab::Local);
+    assert_eq!(app.active_panel, ActivePanel::Library);
+
+    // Modify local tab state
+    app.library_cursor = 7;
+    app.active_panel = ActivePanel::Queue;
+    app.queue_cursor = 3;
+
+    // Switch to Spotify
+    app.switch_source(mixed::app::SourceTab::Spotify);
+    assert_eq!(app.source, mixed::app::SourceTab::Spotify);
+    assert_eq!(app.active_panel, ActivePanel::Library);
+    assert_eq!(app.queue_cursor, 0);
+
+    // Change Spotify panel to NowPlaying
+    app.active_panel = ActivePanel::NowPlaying;
+
+    // Switch back to Local
+    app.switch_source(mixed::app::SourceTab::Local);
+    assert_eq!(app.source, mixed::app::SourceTab::Local);
+    assert_eq!(app.active_panel, ActivePanel::Queue);
+    assert_eq!(app.queue_cursor, 3);
+    assert_eq!(app.library_cursor, 7);
+
+    // Switch to Spotify again
+    app.switch_source(mixed::app::SourceTab::Spotify);
+    assert_eq!(app.active_panel, ActivePanel::NowPlaying);
+}
+
+#[test]
+fn test_source_switching_keybindings_and_alt_fallback() {
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    app.awaiting_dir_input = false;
+    app.player_loading = false;
+
+    // Ctrl+2 -> Spotify
+    events::handle_key(
+        &mut app,
+        create_mod_key_event(KeyCode::Char('2'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(app.source, mixed::app::SourceTab::Spotify);
+
+    // Alt+3 -> YouTube
+    events::handle_key(
+        &mut app,
+        create_mod_key_event(KeyCode::Char('3'), KeyModifiers::ALT),
+    );
+    assert_eq!(app.source, mixed::app::SourceTab::YouTube);
+
+    // Ctrl+4 -> Unified
+    events::handle_key(
+        &mut app,
+        create_mod_key_event(KeyCode::Char('4'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(app.source, mixed::app::SourceTab::Unified);
+
+    // Alt+1 -> Local
+    events::handle_key(
+        &mut app,
+        create_mod_key_event(KeyCode::Char('1'), KeyModifiers::ALT),
+    );
+    assert_eq!(app.source, mixed::app::SourceTab::Local);
+
+    // Ctrl+C -> Quit
+    let quit = events::handle_key(
+        &mut app,
+        create_mod_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    assert!(quit, "Ctrl+C must trigger quit");
+}
+
+#[test]
+fn test_source_switching_digits_do_not_leak_into_search() {
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    app.awaiting_dir_input = false;
+    app.player_loading = false;
+
+    // Enter search mode
+    app.active_panel = ActivePanel::Search;
+    app.searching = true;
+    app.search_query.clear();
+
+    // Send Ctrl+2
+    events::handle_key(
+        &mut app,
+        create_mod_key_event(KeyCode::Char('2'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(app.source, mixed::app::SourceTab::Spotify);
+    assert!(
+        app.search_query.is_empty(),
+        "Ctrl+2 must not leak '2' into search query"
+    );
+    assert!(!app.searching, "Source switch must exit search mode");
+
+    // Enter search mode again
+    app.active_panel = ActivePanel::Search;
+    app.searching = true;
+    app.search_query.clear();
+
+    // Send Alt+3
+    events::handle_key(
+        &mut app,
+        create_mod_key_event(KeyCode::Char('3'), KeyModifiers::ALT),
+    );
+    assert_eq!(app.source, mixed::app::SourceTab::YouTube);
+    assert!(
+        app.search_query.is_empty(),
+        "Alt+3 must not leak '3' into search query"
+    );
+    assert!(!app.searching, "Source switch must exit search mode");
+}
+
+#[test]
+fn test_control_modifiers_do_not_trigger_plain_actions() {
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    app.awaiting_dir_input = false;
+    app.player_loading = false;
+
+    // Initial shuffle is false
+    assert!(!app.playlist.shuffle);
+
+    // Send Ctrl+s (should NOT toggle shuffle)
+    events::handle_key(
+        &mut app,
+        create_mod_key_event(KeyCode::Char('s'), KeyModifiers::CONTROL),
+    );
+    assert!(!app.playlist.shuffle, "Ctrl+S must not trigger shuffle");
+
+    // Send plain 's' (should toggle shuffle)
+    events::handle_key(&mut app, create_key_event(KeyCode::Char('s')));
+    assert!(app.playlist.shuffle, "Plain 's' should toggle shuffle");
+}
+
+#[test]
+fn test_remote_source_empty_state_and_footer_rendering() {
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    app.awaiting_dir_input = false;
+    app.player_loading = false;
+
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // Switch to Spotify
+    app.switch_source(mixed::app::SourceTab::Spotify);
+    terminal.draw(|f| layout::draw(f, &mut app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
+    assert!(content.contains("Not connected. Press Enter to sign in."));
+    assert!(content.contains("local"));
+    assert!(content.contains("spotify"));
+    assert!(content.contains("youtube"));
+    assert!(content.contains("queue"));
+}
+
+#[test]
+fn test_mixed_trackref_playlist_and_queue_rendering() {
+    use mixed::data::metadata::TrackMetadata;
+    use mixed::data::playlist::Playlist;
+    use mixed::data::track::TrackRef;
+
+    let mut playlist = Playlist::new();
+
+    let meta_local = TrackMetadata {
+        title: Some("Local Song".into()),
+        artist: Some("Local Artist".into()),
+        duration: Some(Duration::from_secs(180)),
+        ..Default::default()
+    };
+    let meta_spotify = TrackMetadata {
+        title: Some("Spotify Hit".into()),
+        artist: Some("Spotify Star".into()),
+        duration: Some(Duration::from_secs(210)),
+        ..Default::default()
+    };
+    let meta_yt = TrackMetadata {
+        title: Some("YouTube Live".into()),
+        artist: Some("Streamer".into()),
+        duration: Some(Duration::from_secs(300)),
+        ..Default::default()
+    };
+
+    let id_local = TrackRef::Local(PathBuf::from("/music/Album/local.flac"));
+    let id_spotify = TrackRef::Spotify("spotify:track:4cOdK2wGLETKBW3PvgPWqT".into());
+    let id_yt = TrackRef::YouTube("dQw4w9WgXcQ".into());
+
+    playlist.add(id_local.clone(), meta_local);
+    playlist.add(id_spotify.clone(), meta_spotify);
+    playlist.add(id_yt.clone(), meta_yt);
+
+    assert_eq!(playlist.len(), 3);
+    assert_eq!(playlist.total_duration_secs(), 690);
+    assert!(playlist.entry_ids.contains(&id_local));
+    assert!(playlist.entry_ids.contains(&id_spotify));
+    assert!(playlist.entry_ids.contains(&id_yt));
+
+    // paths() should only contain local paths
+    assert_eq!(
+        playlist.paths(),
+        vec![PathBuf::from("/music/Album/local.flac")]
+    );
+    assert_eq!(
+        playlist.ids(),
+        vec![id_local.clone(), id_spotify.clone(), id_yt.clone()]
+    );
+
+    // Visual items: verify folder header appears only for local track with parent
+    {
+        let items = playlist.get_visual_items(true, false);
+        let mut header_names = Vec::new();
+        for item in items.iter() {
+            if let mixed::data::playlist::QueueVisualItem::Header { name } = item {
+                header_names.push(name.as_str());
+            }
+        }
+        assert_eq!(header_names, vec!["Album"]);
+    }
+
+    // Test play_next with Spotify track
+    let meta_next = TrackMetadata {
+        title: Some("Next Up".into()),
+        artist: Some("DJ".into()),
+        duration: Some(Duration::from_secs(120)),
+        ..Default::default()
+    };
+    let id_next = TrackRef::Spotify("spotify:track:next123".into());
+    playlist.current = 0;
+    playlist.play_next(id_next.clone(), meta_next);
+
+    assert_eq!(playlist.len(), 4);
+    assert!(playlist.entry_ids.contains(&id_next));
+    assert_eq!(playlist.play_order, vec![0, 3, 1, 2]);
+
+    // Remove entry at idx 3
+    playlist.remove(3);
+    assert_eq!(playlist.len(), 3);
+    assert!(!playlist.entry_ids.contains(&id_next));
+}
+
+#[test]
+fn test_session_state_serde_compatibility() {
+    use mixed::config::session::SessionState;
+    use mixed::data::metadata::TrackMetadata;
+    use mixed::data::playlist::PlaylistEntry;
+    use mixed::data::track::TrackRef;
+
+    // 1. Verify deserialization of legacy state without "queue"
+    let legacy_json = r#"{
+        "playlist_paths": ["/music/old1.mp3", "/music/old2.mp3"],
+        "current_index": 1,
+        "position_ms": 42000,
+        "was_playing": true,
+        "volume": 85,
+        "repeat_mode": "Queue",
+        "shuffle": true
+    }"#;
+
+    let restored: SessionState =
+        serde_json::from_str(legacy_json).expect("Must parse legacy session JSON");
+    assert!(
+        restored.queue.is_empty(),
+        "Queue must default to empty when missing"
+    );
+    assert_eq!(restored.playlist_paths.len(), 2);
+    assert_eq!(restored.current_index, 1);
+    assert_eq!(restored.volume, 85);
+    assert_eq!(
+        restored.repeat_mode,
+        mixed::data::playlist::RepeatMode::Queue
+    );
+    assert!(restored.shuffle);
+
+    // 2. Verify serialization and round-trip of new state with mixed TrackRefs
+    let mut state = SessionState::default();
+    state.queue.push(PlaylistEntry::new(
+        TrackRef::Local(PathBuf::from("/music/test.mp3")),
+        TrackMetadata {
+            title: Some("Test Local".into()),
+            ..Default::default()
+        },
+    ));
+    state.queue.push(PlaylistEntry::new(
+        TrackRef::Spotify("spotify:track:abc123".into()),
+        TrackMetadata {
+            title: Some("Test Spotify".into()),
+            ..Default::default()
+        },
+    ));
+    state.queue.push(PlaylistEntry::new(
+        TrackRef::YouTube("yt_video_id_xyz".into()),
+        TrackMetadata {
+            title: Some("Test YouTube".into()),
+            ..Default::default()
+        },
+    ));
+
+    let json = serde_json::to_string(&state).expect("Must serialize SessionState");
+    let roundtrip: SessionState =
+        serde_json::from_str(&json).expect("Must deserialize SessionState");
+
+    assert_eq!(roundtrip.queue.len(), 3);
+    assert_eq!(
+        roundtrip.queue[0].id,
+        TrackRef::Local(PathBuf::from("/music/test.mp3"))
+    );
+    assert_eq!(
+        roundtrip.queue[1].id,
+        TrackRef::Spotify("spotify:track:abc123".into())
+    );
+    assert_eq!(
+        roundtrip.queue[2].id,
+        TrackRef::YouTube("yt_video_id_xyz".into())
+    );
+}
+
+#[test]
+fn test_toggle_enqueue_tracks_logic() {
+    use mixed::data::metadata::TrackMetadata;
+    use mixed::data::track::TrackRef;
+
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    app.awaiting_dir_input = false;
+    app.player_loading = false;
+
+    let t1 = (
+        TrackRef::Local(PathBuf::from("/music/t1.mp3")),
+        TrackMetadata {
+            title: Some("Track 1".into()),
+            disc_number: Some(1),
+            track_number: Some(2),
+            ..Default::default()
+        },
+    );
+    let t2 = (
+        TrackRef::Local(PathBuf::from("/music/t2.mp3")),
+        TrackMetadata {
+            title: Some("Track 2".into()),
+            disc_number: Some(1),
+            track_number: Some(1),
+            ..Default::default()
+        },
+    );
+
+    // Initial enqueue: should sort t2 before t1 because track_number 1 < 2
+    app.toggle_enqueue_tracks(&[t1.clone(), t2.clone()], false);
+    assert_eq!(app.playlist.len(), 2);
+    assert_eq!(app.playlist.entries[0].id, t2.0);
+    assert_eq!(app.playlist.entries[1].id, t1.0);
+
+    // Dequeue: calling toggle with the exact same tracks dequeues them
+    app.toggle_enqueue_tracks(&[t1.clone(), t2.clone()], false);
+    assert_eq!(app.playlist.len(), 0);
+}
+
+#[test]
+fn test_player_events_handling() {
+    use mixed::audio::player::PlayerEvent;
+    use mixed::data::metadata::TrackMetadata;
+    use mixed::data::track::TrackRef;
+
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    app.awaiting_dir_input = false;
+    app.player_loading = false;
+
+    // Add 2 dummy tracks to playlist
+    let t1 = (
+        TrackRef::Local(PathBuf::from("/music/t1.mp3")),
+        TrackMetadata {
+            title: Some("Track 1".into()),
+            ..Default::default()
+        },
+    );
+    let t2 = (
+        TrackRef::Local(PathBuf::from("/music/t2.mp3")),
+        TrackMetadata {
+            title: Some("Track 2".into()),
+            ..Default::default()
+        },
+    );
+    app.playlist.add(t1.0.clone(), t1.1.clone());
+    app.playlist.add(t2.0.clone(), t2.1.clone());
+    app.playlist.current = 0;
+    app.stopped = false;
+
+    // Initial load_generation
+    let gen = app.load_generation;
+
+    // Event for stale generation should be ignored
+    app.handle_player_event(PlayerEvent::Buffering {
+        generation: gen + 10,
+    });
+    assert!(!app.buffering);
+
+    // Matching generation Buffering
+    app.handle_player_event(PlayerEvent::Buffering { generation: gen });
+    assert!(app.buffering);
+
+    // Matching generation Loaded
+    app.handle_player_event(PlayerEvent::Loaded { generation: gen });
+    assert!(!app.buffering);
+    assert_eq!(app.consecutive_failures, 0);
+
+    // Finished event: advances to track 2
+    app.handle_player_event(PlayerEvent::Finished { generation: gen });
+    assert_eq!(app.playlist.current, 1);
+
+    // Current gen updated when track advanced (via play_current or manual load)
+    let gen2 = app.load_generation;
+
+    // Failure 1: advances to track 1 (loops or advances)
+    app.handle_player_event(PlayerEvent::Failed {
+        generation: gen2,
+        error: "Corrupted audio stream".into(),
+    });
+    assert_eq!(app.consecutive_failures, 1);
+
+    // Failure 2
+    let gen3 = app.load_generation;
+    app.handle_player_event(PlayerEvent::Failed {
+        generation: gen3,
+        error: "Decode error".into(),
+    });
+    assert_eq!(app.consecutive_failures, 2);
+
+    // Failure 3: halts playback and shows 3 consecutive failures status
+    let gen4 = app.load_generation;
+    app.handle_player_event(PlayerEvent::Failed {
+        generation: gen4,
+        error: "I/O error".into(),
+    });
+    assert_eq!(app.consecutive_failures, 3);
+    assert!(app.stopped);
+    assert!(app
+        .status_msg
+        .as_deref()
+        .unwrap_or("")
+        .contains("3 consecutive track failures"));
+}
+
+#[test]
+fn test_app_config_serde_defaults() {
+    let legacy_json = r#"{
+        "music_dir": "/home/music",
+        "volume": 75,
+        "visualizer_enabled": true,
+        "visualizer_height": 5,
+        "cover_enabled": true,
+        "color_scheme": 1,
+        "strip_track_numbers": true,
+        "desktop_notifications": true
+    }"#;
+
+    let config: AppConfig =
+        serde_json::from_str(legacy_json).expect("Legacy config should deserialize cleanly");
+    assert_eq!(config.spotify_client_id, None);
+    assert_eq!(config.yt_dlp_path, None);
+    assert_eq!(config.yt_cache_mb, 512);
+    assert_eq!(config.yt_audio_quality, "bestaudio");
+}
+
+#[test]
+fn test_remote_source_browse_and_search_rendering() {
+    use mixed::app::{ActivePanel, SourceTab};
+    use mixed::data::track::TrackRef;
+    use mixed::sources::{BrowseItem, BrowseItemKind};
+
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    app.awaiting_dir_input = false;
+    app.player_loading = false;
+
+    let backend = TestBackend::new(90, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // 1. Switch to Spotify source (unconnected state)
+    app.source = SourceTab::Spotify;
+    app.active_panel = ActivePanel::Library;
+    terminal.draw(|f| layout::draw(f, &mut app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
+    assert!(content.contains("Spotify Source"));
+    assert!(content.contains("Not connected"));
+
+    // 2. Connected state with browse items
+    if let Some(view) = app.active_source_view_mut() {
+        view.connected = true;
+        view.flat = vec![
+            BrowseItem {
+                id: "album:1".into(),
+                title: "Discovery".into(),
+                subtitle: Some("Daft Punk".into()),
+                kind: BrowseItemKind::Album,
+                is_container: true,
+                track_ref: None,
+                duration_secs: None,
+                artwork_url: None,
+                depth: 0,
+            },
+            BrowseItem {
+                id: "track:1".into(),
+                title: "One More Time".into(),
+                subtitle: Some("Daft Punk".into()),
+                kind: BrowseItemKind::Track,
+                is_container: false,
+                track_ref: Some(TrackRef::Spotify("spotify:track:1".into())),
+                duration_secs: Some(320),
+                artwork_url: None,
+                depth: 0,
+            },
+        ];
+        view.cursor = 1; // cursor on track
+    }
+
+    terminal.draw(|f| layout::draw(f, &mut app)).unwrap();
+    let buffer2 = terminal.backend().buffer();
+    let content2: String = buffer2.content().iter().map(|c| c.symbol()).collect();
+    assert!(content2.contains("Discovery"));
+    assert!(content2.contains("One More Time"));
+
+    // 3. Remote enqueue selected
+    app.remote_enqueue_selected(false, false);
+    assert_eq!(app.playlist.len(), 1);
+    assert_eq!(
+        app.playlist.entries[0].id,
+        TrackRef::Spotify("spotify:track:1".into())
+    );
+
+    // 4. Remote search view
+    app.active_panel = ActivePanel::Search;
+    if let Some(view) = app.active_source_view_mut() {
+        view.search_query = "Daft Punk".into();
+        view.search_results = vec![BrowseItem {
+            id: "track:2".into(),
+            title: "Harder Better Faster Stronger".into(),
+            subtitle: Some("Daft Punk".into()),
+            kind: BrowseItemKind::Track,
+            is_container: false,
+            track_ref: Some(TrackRef::Spotify("spotify:track:2".into())),
+            duration_secs: Some(224),
+            artwork_url: None,
+            depth: 0,
+        }];
+        view.cursor = 0;
+    }
+
+    terminal.draw(|f| layout::draw(f, &mut app)).unwrap();
+    let buffer3 = terminal.backend().buffer();
+    let content3: String = buffer3.content().iter().map(|c| c.symbol()).collect();
+    assert!(content3.contains("Search Spotify: Daft Punk"));
+    assert!(content3.contains("Harder Better Faster Stronger"));
+}
+
+#[test]
+fn test_playlist_peek_next_entry() {
+    let mut playlist = mixed::data::playlist::Playlist::new();
+    assert!(playlist.peek_next_entry().is_none());
+
+    let meta1 = mixed::data::metadata::TrackMetadata {
+        title: Some("Song 1".into()),
+        artist: Some("Artist 1".into()),
+        duration: Some(std::time::Duration::from_secs(180)),
+        ..Default::default()
+    };
+    let meta2 = mixed::data::metadata::TrackMetadata {
+        title: Some("Song 2".into()),
+        artist: Some("Artist 2".into()),
+        duration: Some(std::time::Duration::from_secs(200)),
+        ..Default::default()
+    };
+
+    playlist.add(
+        mixed::data::track::TrackRef::YouTube("yt_track_1".into()),
+        meta1,
+    );
+    playlist.add(
+        mixed::data::track::TrackRef::YouTube("yt_track_2".into()),
+        meta2,
+    );
+
+    // Current is at 0 (Song 1). Next should be Song 2.
+    assert_eq!(
+        playlist
+            .peek_next_entry()
+            .and_then(|e| e.metadata.title.as_deref()),
+        Some("Song 2")
+    );
+
+    // Advance to Song 2
+    playlist.advance_track();
+    assert_eq!(
+        playlist
+            .current_entry()
+            .and_then(|e| e.metadata.title.as_deref()),
+        Some("Song 2")
+    );
+
+    // Repeat Off: peek next is None
+    playlist.repeat = mixed::data::playlist::RepeatMode::Off;
+    assert!(playlist.peek_next_entry().is_none());
+
+    // Repeat Queue: peek next wraps to Song 1
+    playlist.repeat = mixed::data::playlist::RepeatMode::Queue;
+    assert_eq!(
+        playlist
+            .peek_next_entry()
+            .and_then(|e| e.metadata.title.as_deref()),
+        Some("Song 1")
+    );
+
+    // Repeat Track: peek next repeats current (Song 2)
+    playlist.repeat = mixed::data::playlist::RepeatMode::Track;
+    assert_eq!(
+        playlist
+            .peek_next_entry()
+            .and_then(|e| e.metadata.title.as_deref()),
+        Some("Song 2")
+    );
+}
+
+#[test]
+fn test_youtube_source_playback_and_events() {
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    let runtime = std::sync::Arc::new(mixed::sources::runtime::SourceRuntime::spawn());
+    app.init_source_runtime(runtime);
+
+    let meta = mixed::data::metadata::TrackMetadata {
+        title: Some("Mock YT Title".into()),
+        artist: Some("Mock YT Artist".into()),
+        duration: Some(std::time::Duration::from_secs(240)),
+        ..Default::default()
+    };
+    app.playlist.add(
+        mixed::data::track::TrackRef::YouTube("mock_yt_vid".into()),
+        meta,
+    );
+
+    // 1. play_current() on non-cached track enters buffering
+    app.play_current();
+    assert!(
+        app.buffering,
+        "Uncached YouTube track must trigger buffering"
+    );
+    let current_gen = app.load_generation;
+
+    // 2. Incoming YouTubeTrackDownloaded for current generation clears buffering
+    app.handle_source_event(mixed::sources::SourceEvent::YouTubeTrackDownloaded {
+        video_id: "mock_yt_vid".into(),
+        path: std::path::PathBuf::from("/tmp/nonexistent_mock.m4a"),
+        generation: current_gen,
+    });
+    assert!(
+        !app.buffering,
+        "Successful download event must clear buffering"
+    );
+
+    // 3. Incoming YouTubeDownloadFailed sets status and failure count
+    app.buffering = true;
+    app.handle_source_event(mixed::sources::SourceEvent::YouTubeDownloadFailed {
+        video_id: "mock_yt_vid".into(),
+        error: "Network connection refused".into(),
+        generation: app.load_generation,
+    });
+    assert!(!app.buffering, "Failed download event must clear buffering");
+    assert!(app
+        .status_msg
+        .as_deref()
+        .unwrap_or("")
+        .contains("YouTube download failed"));
+}
+
+#[test]
+fn test_stale_search_reply_dropped_after_new_query() {
+    use mixed::app::SourceTab;
+    use mixed::sources::{BrowseItem, BrowseItemKind, SourceEvent};
+
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+
+    // Switch to Spotify and simulate search query 1
+    app.source = SourceTab::Spotify;
+    app.dispatch_remote_search("Radiohead".into());
+    let gen1 = app.spotify_view.search_generation;
+
+    // Fast-typing: user types second query before network returns query 1
+    app.dispatch_remote_search("Radiohead Karma Police".into());
+    let gen2 = app.spotify_view.search_generation;
+    assert_ne!(
+        gen1, gen2,
+        "Subsequent queries must increment search generation"
+    );
+
+    // Network reply for gen1 arrives (stale reply)
+    let stale_items = vec![BrowseItem {
+        id: "spotify:track:stale".into(),
+        title: "Creep".into(),
+        subtitle: Some("Radiohead".into()),
+        kind: BrowseItemKind::Track,
+        is_container: false,
+        track_ref: Some(mixed::data::track::TrackRef::Spotify(
+            "spotify:track:stale".into(),
+        )),
+        duration_secs: Some(238),
+        artwork_url: None,
+        depth: 0,
+    }];
+
+    app.handle_source_event(SourceEvent::SearchResults {
+        source: SourceTab::Spotify,
+        query: "Radiohead".into(),
+        generation: gen1,
+        items: stale_items,
+        page: 0,
+        has_more: false,
+    });
+
+    // Stale items must be dropped because view.search_generation == gen2
+    assert!(
+        app.spotify_view.search_results.is_empty(),
+        "Stale search results from previous generation must be dropped"
+    );
+    assert!(
+        app.spotify_view.loading,
+        "View must stay in loading state awaiting the active generation"
+    );
+
+    // Network reply for gen2 arrives
+    let fresh_items = vec![BrowseItem {
+        id: "spotify:track:fresh".into(),
+        title: "Karma Police".into(),
+        subtitle: Some("Radiohead".into()),
+        kind: BrowseItemKind::Track,
+        is_container: false,
+        track_ref: Some(mixed::data::track::TrackRef::Spotify(
+            "spotify:track:fresh".into(),
+        )),
+        duration_secs: Some(264),
+        artwork_url: None,
+        depth: 0,
+    }];
+
+    app.handle_source_event(SourceEvent::SearchResults {
+        source: SourceTab::Spotify,
+        query: "Radiohead Karma Police".into(),
+        generation: gen2,
+        items: fresh_items,
+        page: 0,
+        has_more: false,
+    });
+
+    assert_eq!(
+        app.spotify_view.search_results.len(),
+        1,
+        "Active generation results must be accepted"
+    );
+    assert_eq!(app.spotify_view.search_results[0].title, "Karma Police");
+    assert!(
+        !app.spotify_view.loading,
+        "Loading flag must clear on current search arrival"
+    );
+}
+
+#[test]
+fn test_spotify_source_playback_and_disconnected_guard() {
+    use mixed::audio::player::PlayerEvent;
+    use mixed::data::metadata::TrackMetadata;
+    use mixed::data::track::TrackRef;
+
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+
+    let sp_track = TrackRef::Spotify("spotify:track:test123".into());
+    let meta = TrackMetadata {
+        title: Some("Test Spotify Track".into()),
+        artist: Some("Test Artist".into()),
+        duration: Some(std::time::Duration::from_secs(180)),
+        ..Default::default()
+    };
+    app.playlist.add(sp_track.clone(), meta);
+
+    // 1. With Spotify not connected: track is never dropped from queue; status notifies user
+    app.spotify_view.connected = false;
+    app.play_current();
+
+    assert_eq!(app.playlist.len(), 1, "Track must remain in queue");
+    assert!(
+        !app.buffering,
+        "Disconnected source must not enter buffering"
+    );
+    assert!(
+        app.status_msg
+            .as_deref()
+            .unwrap_or("")
+            .contains("Spotify not connected"),
+        "Status must direct user to log in when source is not connected"
+    );
+
+    // 2. With Spotify connected: entering buffering and loading track
+    app.spotify_view.connected = true;
+    app.play_current();
+
+    assert!(app.buffering, "Connected source must enter buffering");
+    let current_gen = app.load_generation;
+
+    // Simulate PlayerEvent::Loaded
+    app.handle_player_event(PlayerEvent::Loaded {
+        generation: current_gen,
+    });
+    assert!(!app.buffering, "PlayerEvent::Loaded must clear buffering");
+    assert_eq!(app.playlist.len(), 1, "Track must stay in queue");
+}
+
+#[cfg(feature = "youtube")]
+#[tokio::test]
+async fn test_youtube_smoke_interface() {
+    // Standalone smoke test isolating ytmapi-rs / YouTube Music interface
+    let client = mixed::sources::youtube::YouTubeClient::new(None).await;
+    assert!(!client.is_authenticated());
+
+    let roots = client.library_roots();
+    assert!(
+        !roots.is_empty(),
+        "Library roots must produce navigation items"
+    );
+    assert_eq!(roots[0].title, "Login with YouTube Music cookie");
+}
+
+fn create_test_app() -> App {
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/mock/music".to_string());
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+    app.awaiting_dir_input = false;
+    app.player_loading = false;
+    app
+}
+
+#[test]
+fn test_shift_enter_play_next_local_and_remote() {
+    let mut app = create_test_app();
+    app.flat_library = vec![
+        mixed::data::library::FlatLibraryItem {
+            depth: 0,
+            is_last: false,
+            ancestor_last: Vec::new(),
+            enqueued: false,
+            entry: mixed::data::library::LibraryEntry::Track {
+                name: "Track A".to_string(),
+                path: std::path::PathBuf::from("/mock/a.mp3"),
+                metadata: mixed::data::metadata::TrackMetadata::default(),
+            },
+        },
+        mixed::data::library::FlatLibraryItem {
+            depth: 0,
+            is_last: true,
+            ancestor_last: Vec::new(),
+            enqueued: false,
+            entry: mixed::data::library::LibraryEntry::Track {
+                name: "Track B".to_string(),
+                path: std::path::PathBuf::from("/mock/b.mp3"),
+                metadata: mixed::data::metadata::TrackMetadata::default(),
+            },
+        },
+    ];
+
+    app.active_panel = ActivePanel::Library;
+    // Cursor 0 is header ".." - Shift+Enter should do nothing
+    app.library_cursor = 0;
+    events::handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    assert!(
+        app.playlist.is_empty(),
+        "Cursor 0 (header) must not queue anything on Shift+Enter"
+    );
+
+    // Cursor 1 is Track A - Shift+Enter queues Track A
+    app.library_cursor = 1;
+    events::handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    assert_eq!(app.playlist.len(), 1);
+    assert_eq!(
+        app.playlist.entries[0].id.local_path(),
+        Some(std::path::Path::new("/mock/a.mp3")),
+        "Cursor 1 must queue Track A"
+    );
+
+    // Remote source: test play_next queues without playing immediately
+    app.source = mixed::app::SourceTab::YouTube;
+    app.active_panel = ActivePanel::Search;
+    app.youtube_view.search_results = vec![mixed::sources::BrowseItem {
+        id: "vid1".to_string(),
+        title: "Remote Video".to_string(),
+        subtitle: None,
+        kind: mixed::sources::BrowseItemKind::Track,
+        is_container: false,
+        track_ref: Some(mixed::data::track::TrackRef::YouTube("vid1".to_string())),
+        duration_secs: Some(180),
+        artwork_url: None,
+        depth: 0,
+    }];
+    app.youtube_view.search_cursor = 0;
+    // Remote play_next
+    app.remote_enqueue_selected(false, true);
+    assert_eq!(app.playlist.len(), 2);
+    assert_eq!(
+        app.playlist.entries[1].id,
+        mixed::data::track::TrackRef::YouTube("vid1".to_string())
+    );
+}
+
+#[test]
+fn test_esc_key_does_not_quit() {
+    let mut app = create_test_app();
+    app.active_panel = ActivePanel::Library;
+
+    let quit = events::handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!quit, "Esc must not quit application");
+    assert_eq!(
+        app.active_panel,
+        ActivePanel::Queue,
+        "Esc should return to Queue from Library"
+    );
+}
+
+#[test]
+fn test_youtube_progressive_playback_and_fallback_to_full_download() {
+    use mixed::audio::growing_file::DownloadProgress;
+    use mixed::audio::player::PlayerEvent;
+    use mixed::sources::SourceEvent;
+
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    // No source runtime: nothing is actually downloaded in this test
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+
+    let vid = "mock_stream_vid_not_cached";
+    app.playlist.add(
+        mixed::data::track::TrackRef::YouTube(vid.into()),
+        mixed::data::metadata::TrackMetadata::default(),
+    );
+    app.play_current();
+    assert!(app.buffering, "uncached track waits for its download");
+
+    // A partial file for some other video must not start playback
+    let progress = std::sync::Arc::new(DownloadProgress::default());
+    app.handle_source_event(SourceEvent::YouTubeTrackStreamable {
+        video_id: "another_video".into(),
+        path: std::path::PathBuf::from("/tmp/another_video.m4a.part"),
+        progress: progress.clone(),
+    });
+    assert!(app.buffering && app.streaming.is_none());
+
+    // The partial file of the current track starts playback before the download ends
+    app.handle_source_event(SourceEvent::YouTubeTrackStreamable {
+        video_id: vid.into(),
+        path: std::path::PathBuf::from("/tmp/mock_stream_vid_not_cached.m4a.part"),
+        progress: progress.clone(),
+    });
+    assert!(!app.buffering, "playback starts from the partial file");
+    let stream = app.streaming.clone().expect("streaming state recorded");
+    assert_eq!(stream.video_id, vid);
+
+    // If the partial file cannot be decoded, wait for the complete download
+    // instead of counting a playback failure and skipping the track.
+    app.handle_player_event(PlayerEvent::Failed {
+        generation: stream.generation,
+        error: "isomp4: missing moov atom".into(),
+    });
+    assert!(app.buffering, "falls back to waiting for the full file");
+    assert!(app.streaming.is_none());
+    assert_eq!(app.consecutive_failures, 0);
+
+    // A later failure of the download itself is reported normally
+    progress.finish(false);
+    app.handle_source_event(SourceEvent::YouTubeDownloadFailed {
+        video_id: vid.into(),
+        error: "network down".into(),
+        generation: 0,
+    });
+    assert!(!app.buffering);
+    assert_eq!(app.consecutive_failures, 1);
+}
+
+#[test]
+fn test_remote_browse_enter_toggles_container_expansion() {
+    use mixed::sources::{BrowseItem, BrowseItemKind, SourceEvent, SourceTab};
+
+    let mut config = AppConfig::load();
+    config.music_dir = Some("/tmp".to_string());
+    let (mpris_cmd_tx, _mpris_cmd_rx) = crossbeam_channel::bounded(100);
+    let (vis_wake_tx, _vis_wake_rx) = crossbeam_channel::bounded(1);
+    let mut app = App::new(config, mpris_cmd_tx, vis_wake_tx);
+
+    let item = |id: &str, is_container: bool| BrowseItem {
+        id: id.to_string(),
+        title: id.to_string(),
+        subtitle: None,
+        kind: BrowseItemKind::Playlist,
+        is_container,
+        track_ref: None,
+        duration_secs: None,
+        artwork_url: None,
+        depth: 0,
+    };
+
+    app.switch_source(SourceTab::YouTube);
+    app.active_panel = ActivePanel::Library;
+    app.youtube_view.connected = true;
+    app.handle_source_event(SourceEvent::Roots {
+        source: SourceTab::YouTube,
+        items: vec![
+            item("yt:library_playlists", true),
+            item("yt:library_albums", true),
+        ],
+    });
+
+    // The reply to "open" nests the children one level below their parent
+    app.handle_source_event(SourceEvent::Children {
+        source: SourceTab::YouTube,
+        parent_id: "yt:library_playlists".into(),
+        items: vec![item("yt:playlist:a", true), item("yt:playlist:b", true)],
+        page: 0,
+        has_more: false,
+    });
+    let depths: Vec<usize> = app.youtube_view.flat.iter().map(|it| it.depth).collect();
+    assert_eq!(depths, vec![0, 1, 1, 0]);
+
+    // Enter on the open container closes it again
+    app.youtube_view.cursor = 0;
+    app.remote_enqueue_selected(false, false);
+    assert_eq!(app.youtube_view.flat.len(), 2);
+    assert!(app.youtube_view.expanded.is_empty());
 }
