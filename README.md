@@ -81,9 +81,11 @@ Quickly explore artist discography, lyrics, or background information in your de
 ### 🌐 Multi-Source Streaming (Spotify, YouTube Music & Local)
 Seamlessly search, browse, enqueue, and play music across multiple sources in one unified player:
 - **Local Library (`Ctrl+1` / `Alt+1`)**: Zero-dependency offline audio playback for FLAC, MP3, WAV, and OGG files with embedded metadata and synchronized lyrics.
-- **Spotify (`Ctrl+2` / `Alt+2`)**: Search and library navigation with raw PCM playback powered by `librespot` (requires Spotify Premium).
-- **YouTube Music (`Ctrl+3` / `Alt+3`)**: Search and browse YouTube Music tracks with background audio caching and 50% sequential prefetch via `yt-dlp`. Playback starts while the track is still downloading.
-- **Unified Queue (`Ctrl+4` / `Alt+4`)**: Mix tracks from local files, Spotify, and YouTube in a single queue with automatic cross-source advancing.
+- **Spotify (`Ctrl+2` / `Alt+2`)**: Search and library navigation (Liked Songs, Playlists, Albums) with raw PCM playback powered by `librespot` (requires Spotify Premium and your own Client ID).
+- **YouTube Music (`Ctrl+3` / `Alt+3`)**: Search and browse YouTube Music tracks with background audio caching and 50% sequential prefetch via `yt-dlp`. Playback starts while the track is still downloading. Search and playback work without an account; a browser cookie adds your own library.
+- **Unified Queue (`Ctrl+4` / `Alt+4`)**: Mix tracks from local files, Spotify, and YouTube in a single queue with automatic cross-source advancing. The queue, including remote tracks, is restored on the next launch.
+
+Remote libraries and search results are shown as a tree like the local library: `Enter` opens and closes albums, playlists and folders. Each source remembers its own tab and cursor. A track that fails to load is skipped, and playback stops after three failures in a row. Lyrics are available for local files only.
 
 ---
 
@@ -91,15 +93,27 @@ Seamlessly search, browse, enqueue, and play music across multiple sources in on
 
 > **Runtime Requirements:**
 > - **Local Playback**: Fully standalone and self-contained binary with all decoders statically compiled in. Zero external runtime dependencies.
-> - **YouTube Music Streaming**: Requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) installed and available in your system `$PATH`.
-> - **Spotify Streaming**: Requires **Spotify Premium** and personal Spotify Developer Client ID (PKCE authorization code flow, no secret required) configured in `~/.config/mixed/credentials.json`.
-> - **Shortcut Fallback**: If your terminal emulator intercepts `Ctrl+1..4`, use `Alt+1..4` instead.
+> - **YouTube Music Streaming**: Requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) installed and available in your system `$PATH` (or set `yt_dlp_path` in `config.json`).
+> - **Spotify Streaming**: Requires **Spotify Premium** and a personal Spotify Developer Client ID (PKCE authorization code flow, no secret required). You paste the Client ID once inside the app; it is saved to `credentials.json`.
+> - **Shortcut Fallback**: `Ctrl+1..4` and `Shift+Enter` are only reported by terminals that support the kitty keyboard protocol (Kitty, Foot, WezTerm, Ghostty, recent Alacritty). Elsewhere, use `Alt+1..4` to switch sources.
 
 ### Authentication & API Setup
 
 For detailed instructions on configuring streaming sources, see the dedicated guides:
-- **[Spotify Authentication & Setup](docs/spotify.md)** — Learn how to set up the PKCE authorization flow, use a custom Client ID for dedicated rate limits, and configure `librespot`.
-- **[YouTube Music Setup](docs/youtube.md)** — Learn how to extract and configure your browser cookies for authenticated YouTube playback and bypass age-restrictions/rate-limits.
+- **[Spotify Setup & Authentication](docs/spotify.md)** — Create a Client ID, sign in from the app, and see what is stored and how playback connects.
+- **[YouTube Music Setup](docs/youtube.md)** — Install `yt-dlp`, optionally sign in with a browser cookie to see your library, and learn how caching and play-while-downloading work.
+
+### Files & Configuration
+
+`mixed` keeps its files in the standard per-user directories. The paths below are for Linux; macOS and Windows use their platform equivalents (the setup guides list the exact `credentials.json` location for each).
+
+| File | Purpose |
+|---|---|
+| `~/.config/mixed/config.json` | Settings: music directory, volume, visualizer, notifications, `yt_dlp_path`, `yt_cache_mb` |
+| `~/.config/mixed/credentials.json` | Spotify Client ID and tokens, YouTube cookie (owner-only permissions) |
+| `~/.local/share/mixed/state.json` | Saved queue and playback position |
+| `~/.cache/mixed/yt/` | Downloaded YouTube audio (limited by `yt_cache_mb`, default 512 MB) |
+| `~/.cache/mixed/mixed.log` | Diagnostics and errors (rotated at 5 MB). Set `MIXED_DEBUG=1` to print them to the terminal instead |
 
 ### Method 1: Pre-compiled Binaries (Recommended)
 
@@ -191,7 +205,7 @@ mixed --play /path/to/song.flac
 | `Ctrl+1` / `Alt+1` | Switch to Local Library Source | Sources |
 | `Ctrl+2` / `Alt+2` | Switch to Spotify Source (requires Premium) | Sources |
 | `Ctrl+3` / `Alt+3` | Switch to YouTube Music Source (streams via yt-dlp) | Sources |
-| `Ctrl+4` / `Alt+4` | Switch to Unified Queue & Search | Sources |
+| `Ctrl+4` / `Alt+4` | Switch to Unified Queue (all sources) | Sources |
 | `Tab` / `Shift+Tab` | Cycle active panel / view | Navigation |
 | `k` / `j` / `↑` / `↓` | Scroll / Navigate list items | Navigation |
 | `q` / `Ctrl+C` | Quit / Graceful Exit | System |
@@ -199,20 +213,21 @@ mixed --play /path/to/song.flac
 | `Space` / `p` | Play / Pause toggle | Playback |
 | `S` | Stop playback | Playback |
 | `n` / `l` / `→` | Next track | Playback |
-| `p` / `h` / `←` | Previous track (restarts track if >3s elapsed) | Playback |
+| `h` / `←` | Previous track (restarts track if >3s elapsed) | Playback |
 | `a` / `d` | Seek backward / forward 5 seconds | Playback |
 | `+` / `=` | Volume up | Playback |
 | `-` / `[` | Volume down | Playback |
 | `s` | Toggle shuffle mode | Playback |
 | `r` | Cycle repeat mode (off → track → queue) | Playback |
-| `Enter` | Enqueue selected item / Play selected queue item | Queue / Library |
-| `Alt + Enter` | Enqueue selected item and play immediately | Queue / Library |
-| `Shift + Enter` | Enqueue selected item to play next | Queue / Library |
-| `o` / `←` / `→` | Toggle / Collapse/Expand directory tree | Library |
+| `Enter` | Enqueue or dequeue selected item / Play selected queue item | Queue / Library / Search |
+| `Enter` | Open or close the selected album, playlist or folder; sign in when not connected | Spotify / YouTube |
+| `Alt + Enter` | Enqueue selected item and play immediately | Library / Search |
+| `Shift + Enter` | Enqueue selected track or folder to play next | Library / Search |
+| `o` / `←` / `→` | Toggle / Collapse/Expand directory tree | Local Library |
 | `Delete` | Remove selected track from the queue | Queue |
 | `Backspace` | Clear the entire queue (stops playback) | Queue |
 | `f` / `g` | Move selected queue item up / down | Queue |
-| `/` | Open search prompt to filter library | Library |
+| `/` | Open search for the active source | Library |
 | `v` | Toggle spectrum/braille visualizer mode | Display |
 | `m` | Toggle full lyrics / 3-line timed lyrics view | Display |
 | `b` / `B` | Search artist in default web browser | Web Search |
@@ -223,6 +238,8 @@ mixed --play /path/to/song.flac
 - **Progress Bar**: Click or drag anywhere on the progress bar to seek instantly.
 - **Scrollbar**: Click or drag along the vertical scrollbar track to jump through lists.
 - **Footer Tabs**: Click on `F2 Playlist`, `F3 Library`, `F4 Track`, `F5 Search`, or `F6 Help` to switch views.
+- **Source Row**: Click `local`, `spotify`, `youtube`, or `queue` above the footer tabs to switch sources.
+- **Lists**: Click a row to select it; click the selected row again to activate it (same as `Enter`).
 - **Track & Artist Search**: In the Track (F4) tab, click the song title or artist name to launch an instant web search.
 
 ---
