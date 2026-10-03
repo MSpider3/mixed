@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Refined fallback codec selection for `yt-dlp` to ensure native Symphonia decoding support (`m4a`, `mp3`, `aac`).
   - Adjusted error reporting and panic hooks to restore terminal state and output to `stdout` securely.
 
+---
+
 ## [1.6.0] - 2026-09-19
 
 ### Fixed
