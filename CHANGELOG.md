@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Redirected background diagnostics and error outputs cleanly to `~/.cache/mixed/mixed.log`, protecting terminal raw mode from screen corruption.
 
 ### Fixed
-- **Audit Hardening & Core Stability (B1–B8, A1–A3, Q1–Q6)**:
+- **Audit Hardening & Core Stability**:
   - Eliminated main thread blocking and unbounded channel allocation in audio/visualizer pipelines.
   - Resolved visualizer wake-up storms via `crossbeam_channel::bounded(1)` throttling.
   - Enforced atomic state exports and batched ring buffer flushes (`BATCH_SIZE = 64`), reducing mutex contention by 64×.

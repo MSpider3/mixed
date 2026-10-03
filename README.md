@@ -92,8 +92,14 @@ Seamlessly search, browse, enqueue, and play music across multiple sources in on
 > **Runtime Requirements:**
 > - **Local Playback**: Fully standalone and self-contained binary with all decoders statically compiled in. Zero external runtime dependencies.
 > - **YouTube Music Streaming**: Requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) installed and available in your system `$PATH`.
-> - **Spotify Streaming**: Requires **Spotify Premium** and personal Spotify Developer Client ID (PKCE authorization code flow, no secret required) configured in `~/.config/mixed/credentials.json` or `mixed.toml`.
+> - **Spotify Streaming**: Requires **Spotify Premium** and personal Spotify Developer Client ID (PKCE authorization code flow, no secret required) configured in `~/.config/mixed/credentials.json`.
 > - **Shortcut Fallback**: If your terminal emulator intercepts `Ctrl+1..4`, use `Alt+1..4` instead.
+
+### Authentication & API Setup
+
+For detailed instructions on configuring streaming sources, see the dedicated guides:
+- **[Spotify Authentication & Setup](docs/spotify.md)** — Learn how to set up the PKCE authorization flow, use a custom Client ID for dedicated rate limits, and configure `librespot`.
+- **[YouTube Music Setup](docs/youtube.md)** — Learn how to extract and configure your browser cookies for authenticated YouTube playback and bypass age-restrictions/rate-limits.
 
 ### Method 1: Pre-compiled Binaries (Recommended)
 
