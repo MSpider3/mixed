@@ -55,6 +55,12 @@ Credentials are kept in `credentials.json` in the `mixed` configuration director
 > 
 > To fix this, you **must** add your `spotify_username` and `spotify_password` to the `credentials.json` file as shown above. `mixed` will use these credentials specifically for the playback backend (`librespot`), which bypasses the developer token restriction and allows streaming to work seamlessly! (The `spotify_client_id` is still required for browsing your library).
 
+> 
+> **Logging in via Google/Facebook/Apple?** If you use a third-party service to log into Spotify, you don't have a traditional password. Instead, you must set a **Device Password**:
+> 1. Go to your Spotify [Account Overview](https://www.spotify.com/account/overview/) page in a web browser.
+> 2. Click on **Set device password** (or just **Device password** in the sidebar).
+> 3. Spotify will show you a numeric username and let you create a device password. Use these exact credentials for `spotify_username` and `spotify_password` in your `credentials.json` file.
+
 On Linux and macOS the file is written with owner-only permissions (`0600`). You do not need to edit it by hand.
 
 `librespot` also keeps its own login and audio cache in the `spotify` folder of the `mixed` cache directory (`~/.cache/mixed/spotify/` on Linux).
