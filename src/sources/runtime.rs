@@ -180,11 +180,16 @@ async fn handle_request(
                 let sp = spotify_client.lock().await;
                 let connected = sp.is_authenticated();
                 let user_name = sp.user_name().map(|s| s.to_string());
+                let error = if !connected {
+                    sp.last_error().map(|s| s.to_string())
+                } else {
+                    None
+                };
                 let _ = event_tx.send(SourceEvent::AuthState {
                     source,
                     connected,
                     user_name,
-                    error: None,
+                    error,
                 });
                 let items = sp.library_roots();
                 let _ = event_tx.send(SourceEvent::Roots { source, items });
@@ -297,20 +302,11 @@ async fn handle_request(
             SourceTab::Spotify => {
                 let mut sp = spotify_client.lock().await;
                 sp.ensure_fresh_token().await;
-                match sp.children(&parent_id, page).await {
-                    Ok(items) => {
-                        let has_more = !items.is_empty();
-                        let _ = event_tx.send(SourceEvent::Children {
-                            source,
-                            parent_id,
-                            items,
-                            page,
-                            has_more,
-                        });
-                    }
-                    Err(e) => {
-                        let _ = event_tx.send(SourceEvent::Error { source, error: e });
-                    }
+                if let Err(e) = sp
+                    .stream_children(&parent_id, event_tx.clone(), source)
+                    .await
+                {
+                    let _ = event_tx.send(SourceEvent::Error { source, error: e });
                 }
             }
             SourceTab::YouTube => {

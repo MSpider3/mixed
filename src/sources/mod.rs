@@ -220,6 +220,18 @@ impl SourceView {
             .min(self.search_results.len().saturating_sub(1));
         true
     }
+
+    /// Append an incremental page of items to the container's cache and active flat list.
+    pub fn append_page(&mut self, parent_id: &str, items: Vec<BrowseItem>) {
+        if let Some(cached) = self.cache.get_mut(parent_id) {
+            cached.extend(items.clone());
+        } else {
+            self.cache.insert(parent_id.to_string(), items.clone());
+        }
+        if self.nav_stack.last().map(|s| s.id.as_str()) == Some(parent_id) {
+            self.flat.extend(items);
+        }
+    }
 }
 
 /// Requests dispatched to the background async network runtime.

@@ -24,6 +24,9 @@ pub struct Credentials {
 
 /// Returns the path to `credentials.json`.
 pub fn credentials_path() -> PathBuf {
+    if let Some(override_path) = std::env::var_os("MIXED_CREDENTIALS_PATH") {
+        return PathBuf::from(override_path);
+    }
     #[cfg(test)]
     {
         std::env::temp_dir().join("mixed_test_credentials.json")
@@ -64,17 +67,29 @@ pub fn credentials_path() -> PathBuf {
 }
 
 impl Credentials {
-    /// Load credentials from disk, or return default if nonexistent or corrupted.
-    pub fn load() -> Self {
+    /// Load credentials from disk returning a detailed error if JSON is malformed.
+    pub fn load_result() -> Result<Self, String> {
         let path = credentials_path();
         if path.exists() {
-            if let Ok(data) = fs::read_to_string(&path) {
-                if let Ok(creds) = serde_json::from_str(&data) {
-                    return creds;
-                }
+            let data = fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+            let creds = serde_json::from_str(&data)
+                .map_err(|e| format!("Invalid JSON in {}: {}", path.display(), e))?;
+            return Ok(creds);
+        }
+        Ok(Self::default())
+    }
+
+    /// Load credentials from disk, or return default and log if nonexistent or corrupted.
+    pub fn load() -> Self {
+        match Self::load_result() {
+            Ok(creds) => creds,
+            Err(e) => {
+                log::error!("{}", e);
+                eprintln!("[mixed] Warning: {}", e);
+                Self::default()
             }
         }
-        Self::default()
     }
 
     /// Save credentials to disk with mode 0600 permissions using atomic rename.

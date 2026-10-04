@@ -341,6 +341,10 @@ impl App {
         #[cfg(not(target_os = "linux"))]
         let _ = command_tx;
 
+        if let Err(e) = crate::config::credentials::Credentials::load_result() {
+            app.set_status(e);
+        }
+
         app
     }
 
@@ -658,13 +662,18 @@ impl App {
                 source,
                 parent_id,
                 items,
-                ..
+                page,
+                has_more,
             } => {
                 if let Some(view) = self.source_view_mut(source) {
-                    view.expand(&parent_id, items.clone());
+                    if page == 0 {
+                        view.expand(&parent_id, items.clone());
+                    } else {
+                        view.append_page(&parent_id, items.clone());
+                    }
                     view.loading = false;
                 }
-                if let Some((pending_id, play_now)) = self.pending_container_enqueue.take() {
+                if let Some((pending_id, play_now)) = self.pending_container_enqueue.clone() {
                     if pending_id == parent_id {
                         let tracks: Vec<(TrackRef, TrackMetadata)> = items
                             .into_iter()
@@ -682,11 +691,12 @@ impl App {
                             .collect();
                         if !tracks.is_empty() {
                             let count = tracks.len();
-                            self.toggle_enqueue_tracks(&tracks, play_now);
+                            self.toggle_enqueue_tracks(&tracks, play_now && page == 0);
                             self.set_status(format!("Enqueued {} tracks", count));
                         }
-                    } else {
-                        self.pending_container_enqueue = Some((pending_id, play_now));
+                        if !has_more {
+                            self.pending_container_enqueue = None;
+                        }
                     }
                 }
                 self.refresh_needed = true;
@@ -803,7 +813,7 @@ impl App {
 
     /// Returns the path to the library JSON cache file for the given music directory.
     fn library_cache_path(music_dir: &str) -> Option<std::path::PathBuf> {
-        let proj = directories::ProjectDirs::from("com", "mixed", "mixed")?;
+        let proj = directories::ProjectDirs::from("", "", "mixed")?;
         let cache_dir = proj.cache_dir().to_path_buf();
         std::fs::create_dir_all(&cache_dir).ok()?;
         // Stable deterministic FNV-1a hash of the music dir path (B3)

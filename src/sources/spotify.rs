@@ -1,6 +1,6 @@
 use super::BrowseItem;
 #[cfg(feature = "spotify")]
-use super::BrowseItemKind;
+use super::{BrowseItemKind, SourceEvent, SourceTab};
 #[cfg(feature = "spotify")]
 use crate::data::track::TrackRef;
 
@@ -128,6 +128,7 @@ pub struct SpotifyClient {
     is_premium: bool,
     /// When the access token was last issued; `None` means its age is unknown.
     token_issued_at: Option<std::time::Instant>,
+    last_error: Option<String>,
     http: reqwest::Client,
 }
 
@@ -142,7 +143,6 @@ const SEARCH_PAGE_SIZE_STR: &str = "10";
 const TOKEN_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(45 * 60);
 
 /// Spotify desktop player client ID (spotify-player / spotatui standard, supports streaming + Web API).
-#[cfg(feature = "spotify")]
 pub const DEFAULT_SPOTIFY_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 
 /// Redirect URI for the default player client ID.
@@ -178,11 +178,15 @@ impl SpotifyClient {
             user_name: None,
             is_premium: false,
             token_issued_at: None,
+            last_error: None,
             http,
         };
 
         if client.access_token.is_some() || client.refresh_token.is_some() {
-            let _ = client.verify_or_refresh_session().await;
+            if let Err(e) = client.verify_or_refresh_session().await {
+                log::warn!("Spotify startup session verification failed: {}", e);
+                client.last_error = Some(e);
+            }
         }
 
         client
@@ -194,6 +198,10 @@ impl SpotifyClient {
 
     pub fn user_name(&self) -> Option<&str> {
         self.user_name.as_deref()
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
     }
 
     pub fn client_id(&self) -> Option<&str> {
@@ -559,44 +567,61 @@ impl SpotifyClient {
         }
     }
 
-    pub async fn children(&self, parent_id: &str, page: usize) -> Result<Vec<BrowseItem>, String> {
+    async fn fetch_page_with_retry(
+        &self,
+        url: &str,
+        token: &str,
+    ) -> Result<reqwest::Response, String> {
+        let mut retries = 0;
+        loop {
+            let resp = self
+                .http
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                retries += 1;
+                if retries > 5 {
+                    return Err("Spotify API rate limit exceeded (HTTP 429)".into());
+                }
+                let retry_secs = resp
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(1);
+                tokio::time::sleep(std::time::Duration::from_secs(retry_secs.clamp(1, 5))).await;
+                continue;
+            }
+
+            return Ok(resp);
+        }
+    }
+
+    /// Stream container children page by page via event channel so first paint is instantaneous (<300ms).
+    pub async fn stream_children(
+        &self,
+        parent_id: &str,
+        event_tx: crossbeam_channel::Sender<SourceEvent>,
+        source: SourceTab,
+    ) -> Result<(), String> {
         let Some(ref token) = self.access_token else {
             return Err("Spotify access token missing".into());
         };
 
-        let offset = page * 50;
-
         if parent_id == "spotify:liked_songs" {
-            let mut all_items = Vec::new();
-            let mut current_offset = offset;
+            let mut current_offset = 0;
+            let mut page_idx = 0;
             loop {
                 let url = format!(
                     "https://api.spotify.com/v1/me/tracks?limit=50&offset={}",
                     current_offset
                 );
-                let resp = self
-                    .http
-                    .get(&url)
-                    .bearer_auth(token)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    let retry_secs = resp
-                        .headers()
-                        .get("Retry-After")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(1);
-                    tokio::time::sleep(std::time::Duration::from_secs(retry_secs.min(5))).await;
-                    continue;
-                }
-
+                let resp = self.fetch_page_with_retry(&url, token).await?;
                 if !resp.status().is_success() {
-                    if !all_items.is_empty() {
-                        break;
-                    }
                     return Err(format!(
                         "Failed to fetch liked songs: HTTP {}",
                         resp.status()
@@ -607,6 +632,9 @@ impl SpotifyClient {
                     .json::<SpotifyPaging<SpotifySavedTrackItem>>()
                     .await
                     .map_err(|e| e.to_string())?;
+
+                let raw_len = data.items.len();
+                let total = data.total;
 
                 let page_items: Vec<_> = data
                     .items
@@ -633,37 +661,34 @@ impl SpotifyClient {
                     })
                     .collect();
 
-                let len = page_items.len();
-                let total = data.total;
-                all_items.extend(page_items);
-                if len < 50 || total.is_some_and(|t| all_items.len() >= t) {
+                let is_last = raw_len < 50 || total.is_some_and(|t| current_offset + raw_len >= t);
+                let _ = event_tx.send(SourceEvent::Children {
+                    source,
+                    parent_id: parent_id.to_string(),
+                    items: page_items,
+                    page: page_idx,
+                    has_more: !is_last,
+                });
+
+                if is_last {
                     break;
                 }
-                current_offset += 50;
+                current_offset += raw_len;
+                page_idx += 1;
             }
-            return Ok(all_items);
+            return Ok(());
         }
 
         if parent_id == "spotify:library_playlists" {
-            let mut all_items = Vec::new();
-            let mut current_offset = offset;
+            let mut current_offset = 0;
+            let mut page_idx = 0;
             loop {
                 let url = format!(
                     "https://api.spotify.com/v1/me/playlists?limit=50&offset={}",
                     current_offset
                 );
-                let resp = self
-                    .http
-                    .get(&url)
-                    .bearer_auth(token)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-
+                let resp = self.fetch_page_with_retry(&url, token).await?;
                 if !resp.status().is_success() {
-                    if !all_items.is_empty() {
-                        break;
-                    }
                     return Err(format!("Failed to fetch playlists: HTTP {}", resp.status()));
                 }
 
@@ -671,6 +696,9 @@ impl SpotifyClient {
                     .json::<SpotifyPaging<SpotifyPlaylistSimple>>()
                     .await
                     .map_err(|e| e.to_string())?;
+
+                let raw_len = data.items.len();
+                let total = data.total;
 
                 let page_items: Vec<_> = data
                     .items
@@ -694,37 +722,34 @@ impl SpotifyClient {
                     })
                     .collect();
 
-                let len = page_items.len();
-                let total = data.total;
-                all_items.extend(page_items);
-                if len < 50 || total.is_some_and(|t| all_items.len() >= t) {
+                let is_last = raw_len < 50 || total.is_some_and(|t| current_offset + raw_len >= t);
+                let _ = event_tx.send(SourceEvent::Children {
+                    source,
+                    parent_id: parent_id.to_string(),
+                    items: page_items,
+                    page: page_idx,
+                    has_more: !is_last,
+                });
+
+                if is_last {
                     break;
                 }
-                current_offset += 50;
+                current_offset += raw_len;
+                page_idx += 1;
             }
-            return Ok(all_items);
+            return Ok(());
         }
 
         if parent_id == "spotify:library_albums" {
-            let mut all_items = Vec::new();
-            let mut current_offset = offset;
+            let mut current_offset = 0;
+            let mut page_idx = 0;
             loop {
                 let url = format!(
                     "https://api.spotify.com/v1/me/albums?limit=50&offset={}",
                     current_offset
                 );
-                let resp = self
-                    .http
-                    .get(&url)
-                    .bearer_auth(token)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-
+                let resp = self.fetch_page_with_retry(&url, token).await?;
                 if !resp.status().is_success() {
-                    if !all_items.is_empty() {
-                        break;
-                    }
                     return Err(format!("Failed to fetch albums: HTTP {}", resp.status()));
                 }
 
@@ -732,6 +757,9 @@ impl SpotifyClient {
                     .json::<SpotifyPaging<SpotifySavedAlbumItem>>()
                     .await
                     .map_err(|e| e.to_string())?;
+
+                let raw_len = data.items.len();
+                let total = data.total;
 
                 let page_items: Vec<_> = data
                     .items
@@ -758,48 +786,34 @@ impl SpotifyClient {
                     })
                     .collect();
 
-                let len = page_items.len();
-                let total = data.total;
-                all_items.extend(page_items);
-                if len < 50 || total.is_some_and(|t| all_items.len() >= t) {
+                let is_last = raw_len < 50 || total.is_some_and(|t| current_offset + raw_len >= t);
+                let _ = event_tx.send(SourceEvent::Children {
+                    source,
+                    parent_id: parent_id.to_string(),
+                    items: page_items,
+                    page: page_idx,
+                    has_more: !is_last,
+                });
+
+                if is_last {
                     break;
                 }
-                current_offset += 50;
+                current_offset += raw_len;
+                page_idx += 1;
             }
-            return Ok(all_items);
+            return Ok(());
         }
 
         if let Some(pid) = parent_id.strip_prefix("spotify:playlist:") {
-            let mut all_items = Vec::new();
-            let mut current_offset = offset;
+            let mut current_offset = 0;
+            let mut page_idx = 0;
             loop {
                 let url = format!(
                     "https://api.spotify.com/v1/playlists/{}/items?limit=100&offset={}",
                     pid, current_offset
                 );
-                let resp = self
-                    .http
-                    .get(&url)
-                    .bearer_auth(token)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    let retry_secs = resp
-                        .headers()
-                        .get("Retry-After")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(1);
-                    tokio::time::sleep(std::time::Duration::from_secs(retry_secs.min(5))).await;
-                    continue;
-                }
-
+                let resp = self.fetch_page_with_retry(&url, token).await?;
                 if !resp.status().is_success() {
-                    if !all_items.is_empty() {
-                        break;
-                    }
                     return Err(format!(
                         "Failed to fetch playlist tracks: HTTP {}",
                         resp.status()
@@ -810,6 +824,9 @@ impl SpotifyClient {
                     .json::<SpotifyPaging<SpotifyPlaylistTrackItem>>()
                     .await
                     .map_err(|e| e.to_string())?;
+
+                let raw_len = data.items.len();
+                let total = data.total;
 
                 let page_items: Vec<_> = data
                     .items
@@ -836,37 +853,34 @@ impl SpotifyClient {
                     })
                     .collect();
 
-                let len = page_items.len();
-                let total = data.total;
-                all_items.extend(page_items);
-                if len < 100 || total.is_some_and(|t| all_items.len() >= t) {
+                let is_last = raw_len < 100 || total.is_some_and(|t| current_offset + raw_len >= t);
+                let _ = event_tx.send(SourceEvent::Children {
+                    source,
+                    parent_id: parent_id.to_string(),
+                    items: page_items,
+                    page: page_idx,
+                    has_more: !is_last,
+                });
+
+                if is_last {
                     break;
                 }
-                current_offset += 100;
+                current_offset += raw_len;
+                page_idx += 1;
             }
-            return Ok(all_items);
+            return Ok(());
         }
 
         if let Some(aid) = parent_id.strip_prefix("spotify:album:") {
-            let mut all_items = Vec::new();
-            let mut current_offset = offset;
+            let mut current_offset = 0;
+            let mut page_idx = 0;
             loop {
                 let url = format!(
                     "https://api.spotify.com/v1/albums/{}/tracks?limit=50&offset={}",
                     aid, current_offset
                 );
-                let resp = self
-                    .http
-                    .get(&url)
-                    .bearer_auth(token)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-
+                let resp = self.fetch_page_with_retry(&url, token).await?;
                 if !resp.status().is_success() {
-                    if !all_items.is_empty() {
-                        break;
-                    }
                     return Err(format!(
                         "Failed to fetch album tracks: HTTP {}",
                         resp.status()
@@ -877,6 +891,9 @@ impl SpotifyClient {
                     .json::<SpotifyPaging<SpotifyTrack>>()
                     .await
                     .map_err(|e| e.to_string())?;
+
+                let raw_len = data.items.len();
+                let total = data.total;
 
                 let page_items: Vec<_> = data
                     .items
@@ -898,18 +915,36 @@ impl SpotifyClient {
                     })
                     .collect();
 
-                let len = page_items.len();
-                let total = data.total;
-                all_items.extend(page_items);
-                if len < 50 || total.is_some_and(|t| all_items.len() >= t) {
+                let is_last = raw_len < 50 || total.is_some_and(|t| current_offset + raw_len >= t);
+                let _ = event_tx.send(SourceEvent::Children {
+                    source,
+                    parent_id: parent_id.to_string(),
+                    items: page_items,
+                    page: page_idx,
+                    has_more: !is_last,
+                });
+
+                if is_last {
                     break;
                 }
-                current_offset += 50;
+                current_offset += raw_len;
+                page_idx += 1;
             }
-            return Ok(all_items);
+            return Ok(());
         }
 
-        Ok(Vec::new())
+        Ok(())
+    }
+
+    pub async fn children(&self, parent_id: &str, _page: usize) -> Result<Vec<BrowseItem>, String> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        self.stream_children(parent_id, tx, SourceTab::Spotify)
+            .await?;
+        let mut all = Vec::new();
+        while let Ok(SourceEvent::Children { items, .. }) = rx.try_recv() {
+            all.extend(items);
+        }
+        Ok(all)
     }
 }
 
@@ -931,6 +966,12 @@ impl SpotifyClient {
     pub fn user_name(&self) -> Option<&str> {
         None
     }
+    pub fn client_id(&self) -> Option<&str> {
+        None
+    }
+    pub fn last_error(&self) -> Option<&str> {
+        None
+    }
     pub fn access_token(&self) -> Option<&str> {
         None
     }
@@ -946,6 +987,14 @@ impl SpotifyClient {
     }
     pub fn library_roots(&self) -> Vec<BrowseItem> {
         Vec::new()
+    }
+    pub async fn stream_children(
+        &self,
+        _parent_id: &str,
+        _event_tx: crossbeam_channel::Sender<super::SourceEvent>,
+        _source: super::SourceTab,
+    ) -> Result<(), String> {
+        Err("Spotify feature not enabled in build".into())
     }
     pub async fn children(
         &self,

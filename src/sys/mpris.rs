@@ -17,7 +17,7 @@ pub struct MprisMetadataStrings {
 }
 
 fn log_mpris_error(msg: &str) {
-    if let Some(proj_dirs) = directories::ProjectDirs::from("com", "mixed", "mixed") {
+    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "mixed") {
         let log_dir = proj_dirs.cache_dir();
         let _ = std::fs::create_dir_all(log_dir);
         let log_path = log_dir.join("mixed.log");
