@@ -11,6 +11,12 @@ pub struct Credentials {
     /// Spotify cached token / refresh data
     #[serde(default)]
     pub spotify_token_cache: Option<String>,
+    /// Spotify username (optional, for streaming if OAuth token is restricted)
+    #[serde(default)]
+    pub spotify_username: Option<String>,
+    /// Spotify password (optional, for streaming)
+    #[serde(default)]
+    pub spotify_password: Option<String>,
     /// YouTube Music session cookie
     #[serde(default)]
     pub youtube_cookie: Option<String>,

@@ -264,11 +264,18 @@ impl SpotifyBackend {
         };
 
         // Prefer librespot's own reusable credentials (they do not expire hourly),
+        // then fall back to username/password if provided in config,
         // then fall back to the Web API access token from the last login/refresh.
         let mut candidates = Vec::new();
         if let Some(cached) = session.cache().and_then(|c| c.credentials()) {
             candidates.push(cached);
         }
+        
+        let config_creds = crate::config::credentials::Credentials::load();
+        if let (Some(user), Some(pass)) = (config_creds.spotify_username, config_creds.spotify_password) {
+            candidates.push(Credentials::with_password(user, pass));
+        }
+        
         if let Some(token) = stored_access_token() {
             candidates.push(Credentials::with_access_token(token));
         }

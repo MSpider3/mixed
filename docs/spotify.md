@@ -44,9 +44,16 @@ Credentials are kept in `credentials.json` in the `mixed` configuration director
 ```json
 {
     "spotify_client_id": "YOUR_CLIENT_ID",
-    "spotify_token_cache": "{\"access_token\":\"…\",\"refresh_token\":\"…\"}"
+    "spotify_token_cache": "{\"access_token\":\"…\",\"refresh_token\":\"…\"}",
+    "spotify_username": "YOUR_SPOTIFY_USERNAME",
+    "spotify_password": "YOUR_SPOTIFY_PASSWORD"
 }
 ```
+
+> [!NOTE]
+> **Playback Errors (PlayerEvent::Unavailable)**: Since ~2022, Spotify blocks audio streaming on non-official developer Client IDs. If you log in via the web prompt and try to play a track, it will immediately fail with `Unavailable`.
+> 
+> To fix this, you **must** add your `spotify_username` and `spotify_password` to the `credentials.json` file as shown above. `mixed` will use these credentials specifically for the playback backend (`librespot`), which bypasses the developer token restriction and allows streaming to work seamlessly! (The `spotify_client_id` is still required for browsing your library).
 
 On Linux and macOS the file is written with owner-only permissions (`0600`). You do not need to edit it by hand.
 
