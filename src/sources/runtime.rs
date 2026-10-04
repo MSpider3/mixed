@@ -30,7 +30,8 @@ impl SourceRuntime {
         let sp_client_id = creds
             .spotify_client_id
             .clone()
-            .or_else(|| config.spotify_client_id.clone());
+            .or_else(|| config.spotify_client_id.clone())
+            .or_else(|| Some(crate::sources::spotify::DEFAULT_SPOTIFY_CLIENT_ID.to_string()));
         let (sp_access, sp_refresh) = creds
             .spotify_token_cache
             .as_deref()
@@ -213,7 +214,7 @@ async fn handle_request(
                 match sp.login(&payload).await {
                     Ok(user_info) => {
                         let mut creds = crate::config::credentials::Credentials::load();
-                        creds.spotify_client_id = Some(payload);
+                        creds.spotify_client_id = sp.client_id().map(ToString::to_string);
                         if let Some(tok) = sp.access_token() {
                             let cache = serde_json::json!({
                                 "access_token": tok,

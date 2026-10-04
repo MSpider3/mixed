@@ -35,7 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Safe Background Logging**:
   - Redirected background diagnostics and error outputs cleanly to `~/.cache/mixed/mixed.log`, protecting terminal raw mode from screen corruption.
 
-### Fixed
+- **Spotify Streaming & Full Playlist Support**:
+  - Configured `librespot` and OAuth flows to use standard desktop player client ID credentials, resolving `PlayerEvent::Unavailable` playback errors on Spotify streaming.
+  - Removed arbitrary 500-track cap on Liked Songs and user playlists; implemented full pagination so libraries with thousands of tracks load completely.
+  - Isolated test harness credentials to ensure `cargo test` never overwrites or wipes user `credentials.json`.
+  - Simplified login flow: users can press `Enter` to sign in directly via browser with no developer account required.
 - **Audit Hardening & Core Stability**:
   - Eliminated main thread blocking and unbounded channel allocation in audio/visualizer pipelines.
   - Resolved visualizer wake-up storms via `crossbeam_channel::bounded(1)` throttling.

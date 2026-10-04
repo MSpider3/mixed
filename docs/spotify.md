@@ -5,31 +5,27 @@
 ## Requirements
 
 - A **Spotify Premium** account. Without Premium, sign-in ends with `Spotify Premium is required.` and the source stays disconnected.
-- Your **own Client ID** from the Spotify Developer Dashboard. `mixed` does not ship a shared one: Spotify limits a development-mode app to a handful of users.
 
-No client secret is needed. `mixed` uses the [OAuth 2.0 authorization code flow with PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow).
+No client secret or developer account is required. `mixed` uses the [OAuth 2.0 authorization code flow with PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow).
 
-## 1. Create a Client ID
+## Quick Start: One-Click Sign In
 
-1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and log in.
-2. Click **Create App** and fill in a name and description.
-3. Under **Redirect URIs**, add exactly:
+1. Switch to Spotify (`Ctrl+2` / `Alt+2`) and open the Library tab (`F3`).
+2. Press `Enter`.
+3. Your browser automatically opens Spotify's authorization page. Click **Agree**.
+4. Spotify redirects back to `mixed`. That's it!
+
+Your library (Liked Songs, full Playlists without 500-track limits, and Albums) will immediately appear and songs are ready to stream.
+
+### (Optional) Using a Personal Developer Client ID
+
+If you prefer to use your own personal Spotify Developer Client ID:
+1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and create an app.
+2. Under **Redirect URIs**, add:
    ```
    http://127.0.0.1:8898/login
    ```
-4. Save, open the app's settings and copy the **Client ID**.
-
-## 2. Sign in from `mixed`
-
-1. Switch to Spotify (`Ctrl+2` / `Alt+2`) and open the Library tab (`F3`).
-2. Press `Enter`. A `Credentials:` prompt appears.
-3. Paste your Client ID and press `Enter`. (`Esc` cancels, `Ctrl+U` clears the input.)
-4. Your browser opens Spotify's authorization page. Approve access.
-5. Spotify redirects to `http://127.0.0.1:8898/login`, where `mixed` is listening. It exchanges the code for tokens and checks that the account has Premium.
-
-When this succeeds, the Library tab shows **Liked Songs**, **Playlists** and **Albums**. This is a one-time step per machine; there is only one approval.
-
-The permissions requested are: reading and controlling playback, streaming, reading your private and collaborative playlists, and reading your library.
+3. Type or paste your Client ID at the `Credentials:` prompt in `mixed` before pressing `Enter`.
 
 ## What is stored
 
@@ -43,23 +39,10 @@ Credentials are kept in `credentials.json` in the `mixed` configuration director
 
 ```json
 {
-    "spotify_client_id": "YOUR_CLIENT_ID",
-    "spotify_token_cache": "{\"access_token\":\"…\",\"refresh_token\":\"…\"}",
-    "spotify_username": "YOUR_SPOTIFY_USERNAME",
-    "spotify_password": "YOUR_SPOTIFY_PASSWORD"
+    "spotify_client_id": "65b708073fc0480ea92a077233ca87bd",
+    "spotify_token_cache": "{\"access_token\":\"…\",\"refresh_token\":\"…\"}"
 }
 ```
-
-> [!NOTE]
-> **Playback Errors (PlayerEvent::Unavailable)**: Since ~2022, Spotify blocks audio streaming on non-official developer Client IDs. If you log in via the web prompt and try to play a track, it will immediately fail with `Unavailable`.
-> 
-> To fix this, you **must** add your `spotify_username` and `spotify_password` to the `credentials.json` file as shown above. `mixed` will use these credentials specifically for the playback backend (`librespot`), which bypasses the developer token restriction and allows streaming to work seamlessly! (The `spotify_client_id` is still required for browsing your library).
-
-> 
-> **Logging in via Google/Facebook/Apple?** If you use a third-party service to log into Spotify, you don't have a traditional password. Instead, you must set a **Device Password**:
-> 1. Go to your Spotify [Account Overview](https://www.spotify.com/account/overview/) page in a web browser.
-> 2. Click on **Set device password** (or just **Device password** in the sidebar).
-> 3. Spotify will show you a numeric username and let you create a device password. Use these exact credentials for `spotify_username` and `spotify_password` in your `credentials.json` file.
 
 On Linux and macOS the file is written with owner-only permissions (`0600`). You do not need to edit it by hand.
 

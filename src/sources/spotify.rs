@@ -141,6 +141,24 @@ const SEARCH_PAGE_SIZE_STR: &str = "10";
 #[cfg(feature = "spotify")]
 const TOKEN_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(45 * 60);
 
+/// Spotify desktop player client ID (spotify-player / spotatui standard, supports streaming + Web API).
+#[cfg(feature = "spotify")]
+pub const DEFAULT_SPOTIFY_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
+
+/// Redirect URI for the default player client ID.
+#[cfg(feature = "spotify")]
+pub const DEFAULT_SPOTIFY_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
+
+/// Return the appropriate redirect URI for a given Spotify client ID.
+#[cfg(feature = "spotify")]
+pub fn redirect_uri_for_client(client_id: &str) -> &'static str {
+    if client_id == DEFAULT_SPOTIFY_CLIENT_ID {
+        DEFAULT_SPOTIFY_REDIRECT_URI
+    } else {
+        "http://127.0.0.1:8898/login"
+    }
+}
+
 #[cfg(feature = "spotify")]
 impl SpotifyClient {
     pub async fn new(
@@ -176,6 +194,10 @@ impl SpotifyClient {
 
     pub fn user_name(&self) -> Option<&str> {
         self.user_name.as_deref()
+    }
+
+    pub fn client_id(&self) -> Option<&str> {
+        self.client_id.as_deref()
     }
 
     pub fn access_token(&self) -> Option<&str> {
@@ -220,13 +242,11 @@ impl SpotifyClient {
             return Err("No valid Spotify session".into());
         };
 
-        let oauth_client = librespot_oauth::OAuthClientBuilder::new(
-            &client_id,
-            "http://127.0.0.1:8898/login",
-            vec![],
-        )
-        .build()
-        .map_err(|e| e.to_string())?;
+        let redirect_uri = redirect_uri_for_client(&client_id);
+        let oauth_client =
+            librespot_oauth::OAuthClientBuilder::new(&client_id, redirect_uri, vec![])
+                .build()
+                .map_err(|e| e.to_string())?;
 
         let new_token = oauth_client
             .refresh_token_async(&refresh_tok)
@@ -289,7 +309,15 @@ impl SpotifyClient {
         }
     }
 
-    pub async fn login(&mut self, client_id: &str) -> Result<String, String> {
+    pub async fn login(&mut self, input_client_id: &str) -> Result<String, String> {
+        let client_id = if input_client_id.trim().is_empty() || input_client_id.trim() == "default"
+        {
+            DEFAULT_SPOTIFY_CLIENT_ID
+        } else {
+            input_client_id.trim()
+        };
+        let redirect_uri = redirect_uri_for_client(client_id);
+
         let scopes = vec![
             "user-read-playback-state",
             "user-modify-playback-state",
@@ -301,14 +329,11 @@ impl SpotifyClient {
             "user-read-private",
         ];
 
-        let oauth_client = librespot_oauth::OAuthClientBuilder::new(
-            client_id,
-            "http://127.0.0.1:8898/login",
-            scopes,
-        )
-        .open_in_browser()
-        .build()
-        .map_err(|e| format!("Failed to create OAuth client: {}", e))?;
+        let oauth_client =
+            librespot_oauth::OAuthClientBuilder::new(client_id, redirect_uri, scopes)
+                .open_in_browser()
+                .build()
+                .map_err(|e| format!("Failed to create OAuth client: {}", e))?;
 
         let token = oauth_client
             .get_access_token_async()
@@ -558,6 +583,9 @@ impl SpotifyClient {
                     .map_err(|e| e.to_string())?;
 
                 if !resp.status().is_success() {
+                    if !all_items.is_empty() {
+                        break;
+                    }
                     return Err(format!(
                         "Failed to fetch liked songs: HTTP {}",
                         resp.status()
@@ -595,8 +623,9 @@ impl SpotifyClient {
                     .collect();
 
                 let len = page_items.len();
+                let total = data.total;
                 all_items.extend(page_items);
-                if len < 50 || all_items.len() >= 500 {
+                if len < 50 || total.is_some_and(|t| all_items.len() >= t) {
                     break;
                 }
                 current_offset += 50;
@@ -605,96 +634,128 @@ impl SpotifyClient {
         }
 
         if parent_id == "spotify:library_playlists" {
-            let url = format!(
-                "https://api.spotify.com/v1/me/playlists?limit=50&offset={}",
-                offset
-            );
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
+            let mut all_items = Vec::new();
+            let mut current_offset = offset;
+            loop {
+                let url = format!(
+                    "https://api.spotify.com/v1/me/playlists?limit=50&offset={}",
+                    current_offset
+                );
+                let resp = self
+                    .http
+                    .get(&url)
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
 
-            if !resp.status().is_success() {
-                return Err(format!("Failed to fetch playlists: HTTP {}", resp.status()));
-            }
-
-            let data = resp
-                .json::<SpotifyPaging<SpotifyPlaylistSimple>>()
-                .await
-                .map_err(|e| e.to_string())?;
-
-            return Ok(data
-                .items
-                .into_iter()
-                .map(|pl| {
-                    let owner = pl
-                        .owner
-                        .and_then(|o| o.display_name)
-                        .unwrap_or_else(|| "Spotify".into());
-                    BrowseItem {
-                        id: format!("spotify:playlist:{}", pl.id),
-                        title: pl.name,
-                        subtitle: Some(format!("Playlist • {}", owner)),
-                        kind: BrowseItemKind::Playlist,
-                        is_container: true,
-                        track_ref: None,
-                        duration_secs: None,
-                        artwork_url: best_image(pl.images.as_deref()),
-                        depth: 0,
+                if !resp.status().is_success() {
+                    if !all_items.is_empty() {
+                        break;
                     }
-                })
-                .collect());
+                    return Err(format!("Failed to fetch playlists: HTTP {}", resp.status()));
+                }
+
+                let data = resp
+                    .json::<SpotifyPaging<SpotifyPlaylistSimple>>()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let page_items: Vec<_> = data
+                    .items
+                    .into_iter()
+                    .map(|pl| {
+                        let owner = pl
+                            .owner
+                            .and_then(|o| o.display_name)
+                            .unwrap_or_else(|| "Spotify".into());
+                        BrowseItem {
+                            id: format!("spotify:playlist:{}", pl.id),
+                            title: pl.name,
+                            subtitle: Some(format!("Playlist • {}", owner)),
+                            kind: BrowseItemKind::Playlist,
+                            is_container: true,
+                            track_ref: None,
+                            duration_secs: None,
+                            artwork_url: best_image(pl.images.as_deref()),
+                            depth: 0,
+                        }
+                    })
+                    .collect();
+
+                let len = page_items.len();
+                let total = data.total;
+                all_items.extend(page_items);
+                if len < 50 || total.is_some_and(|t| all_items.len() >= t) {
+                    break;
+                }
+                current_offset += 50;
+            }
+            return Ok(all_items);
         }
 
         if parent_id == "spotify:library_albums" {
-            let url = format!(
-                "https://api.spotify.com/v1/me/albums?limit=50&offset={}",
-                offset
-            );
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
+            let mut all_items = Vec::new();
+            let mut current_offset = offset;
+            loop {
+                let url = format!(
+                    "https://api.spotify.com/v1/me/albums?limit=50&offset={}",
+                    current_offset
+                );
+                let resp = self
+                    .http
+                    .get(&url)
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
 
-            if !resp.status().is_success() {
-                return Err(format!("Failed to fetch albums: HTTP {}", resp.status()));
-            }
-
-            let data = resp
-                .json::<SpotifyPaging<SpotifySavedAlbumItem>>()
-                .await
-                .map_err(|e| e.to_string())?;
-
-            return Ok(data
-                .items
-                .into_iter()
-                .map(|item| {
-                    let album = item.album;
-                    let artists: Vec<String> = album
-                        .artists
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|a| a.name)
-                        .collect();
-                    BrowseItem {
-                        id: format!("spotify:album:{}", album.id),
-                        title: album.name,
-                        subtitle: Some(artists.join(", ")),
-                        kind: BrowseItemKind::Album,
-                        is_container: true,
-                        track_ref: None,
-                        duration_secs: None,
-                        artwork_url: best_image(album.images.as_deref()),
-                        depth: 0,
+                if !resp.status().is_success() {
+                    if !all_items.is_empty() {
+                        break;
                     }
-                })
-                .collect());
+                    return Err(format!("Failed to fetch albums: HTTP {}", resp.status()));
+                }
+
+                let data = resp
+                    .json::<SpotifyPaging<SpotifySavedAlbumItem>>()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let page_items: Vec<_> = data
+                    .items
+                    .into_iter()
+                    .map(|item| {
+                        let album = item.album;
+                        let artists: Vec<String> = album
+                            .artists
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|a| a.name)
+                            .collect();
+                        BrowseItem {
+                            id: format!("spotify:album:{}", album.id),
+                            title: album.name,
+                            subtitle: Some(artists.join(", ")),
+                            kind: BrowseItemKind::Album,
+                            is_container: true,
+                            track_ref: None,
+                            duration_secs: None,
+                            artwork_url: best_image(album.images.as_deref()),
+                            depth: 0,
+                        }
+                    })
+                    .collect();
+
+                let len = page_items.len();
+                let total = data.total;
+                all_items.extend(page_items);
+                if len < 50 || total.is_some_and(|t| all_items.len() >= t) {
+                    break;
+                }
+                current_offset += 50;
+            }
+            return Ok(all_items);
         }
 
         if let Some(pid) = parent_id.strip_prefix("spotify:playlist:") {
@@ -714,6 +775,9 @@ impl SpotifyClient {
                     .map_err(|e| e.to_string())?;
 
                 if !resp.status().is_success() {
+                    if !all_items.is_empty() {
+                        break;
+                    }
                     return Err(format!(
                         "Failed to fetch playlist tracks: HTTP {}",
                         resp.status()
@@ -751,8 +815,9 @@ impl SpotifyClient {
                     .collect();
 
                 let len = page_items.len();
+                let total = data.total;
                 all_items.extend(page_items);
-                if len < 50 || all_items.len() >= 500 {
+                if len < 50 || total.is_some_and(|t| all_items.len() >= t) {
                     break;
                 }
                 current_offset += 50;
@@ -761,48 +826,65 @@ impl SpotifyClient {
         }
 
         if let Some(aid) = parent_id.strip_prefix("spotify:album:") {
-            let url = format!(
-                "https://api.spotify.com/v1/albums/{}/tracks?limit=50&offset={}",
-                aid, offset
-            );
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
+            let mut all_items = Vec::new();
+            let mut current_offset = offset;
+            loop {
+                let url = format!(
+                    "https://api.spotify.com/v1/albums/{}/tracks?limit=50&offset={}",
+                    aid, current_offset
+                );
+                let resp = self
+                    .http
+                    .get(&url)
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
 
-            if !resp.status().is_success() {
-                return Err(format!(
-                    "Failed to fetch album tracks: HTTP {}",
-                    resp.status()
-                ));
-            }
-
-            let data = resp
-                .json::<SpotifyPaging<SpotifyTrack>>()
-                .await
-                .map_err(|e| e.to_string())?;
-
-            return Ok(data
-                .items
-                .into_iter()
-                .map(|track| {
-                    let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
-                    BrowseItem {
-                        id: format!("spotify:track:{}", track.id),
-                        title: track.name,
-                        subtitle: Some(artists.join(", ")),
-                        kind: BrowseItemKind::Track,
-                        is_container: false,
-                        track_ref: Some(TrackRef::Spotify(track.uri)),
-                        duration_secs: Some(track.duration_ms / 1000),
-                        artwork_url: None,
-                        depth: 0,
+                if !resp.status().is_success() {
+                    if !all_items.is_empty() {
+                        break;
                     }
-                })
-                .collect());
+                    return Err(format!(
+                        "Failed to fetch album tracks: HTTP {}",
+                        resp.status()
+                    ));
+                }
+
+                let data = resp
+                    .json::<SpotifyPaging<SpotifyTrack>>()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let page_items: Vec<_> = data
+                    .items
+                    .into_iter()
+                    .map(|track| {
+                        let artists: Vec<String> =
+                            track.artists.into_iter().map(|a| a.name).collect();
+                        BrowseItem {
+                            id: format!("spotify:track:{}", track.id),
+                            title: track.name,
+                            subtitle: Some(artists.join(", ")),
+                            kind: BrowseItemKind::Track,
+                            is_container: false,
+                            track_ref: Some(TrackRef::Spotify(track.uri)),
+                            duration_secs: Some(track.duration_ms / 1000),
+                            artwork_url: None,
+                            depth: 0,
+                        }
+                    })
+                    .collect();
+
+                let len = page_items.len();
+                let total = data.total;
+                all_items.extend(page_items);
+                if len < 50 || total.is_some_and(|t| all_items.len() >= t) {
+                    break;
+                }
+                current_offset += 50;
+            }
+            return Ok(all_items);
         }
 
         Ok(Vec::new())

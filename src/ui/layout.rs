@@ -1103,11 +1103,11 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(C_FG),
                 )));
                 lines.push(Line::from(Span::styled(
-                    "  • Requires personal Spotify Client ID.",
+                    "  • Press Enter to sign in via Spotify in your browser.",
                     Style::default().fg(C_FG),
                 )));
                 lines.push(Line::from(Span::styled(
-                    "  • Press Enter to configure Client ID / authorize via PKCE.",
+                    "  • (Optional) Type a custom Client ID before pressing Enter.",
                     Style::default().fg(C_DIM),
                 )));
             }

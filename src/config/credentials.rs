@@ -24,30 +24,37 @@ pub struct Credentials {
 
 /// Returns the path to `credentials.json`.
 pub fn credentials_path() -> PathBuf {
-    let is_test = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .map(|name| name.contains("test") || name.contains("mpris"))
-        .unwrap_or(false);
+    #[cfg(test)]
+    {
+        std::env::temp_dir().join("mixed_test_credentials.json")
+    }
+    #[cfg(not(test))]
+    {
+        let is_test = std::env::current_exe()
+            .ok()
+            .map(|p| {
+                let s = p.to_string_lossy().into_owned();
+                s.contains("deps") || s.contains("test") || s.contains("mpris")
+            })
+            .unwrap_or(false);
 
-    if is_test {
-        let mut path = std::env::temp_dir();
-        path.push("mixed_test_credentials.json");
-        path
-    } else if let Some(dir) = directories::ProjectDirs::from("", "", "mixed") {
-        let path = dir.config_dir().to_path_buf();
-        let _ = fs::create_dir_all(&path);
-        path.join("credentials.json")
-    } else {
-        let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
-        let fallback_dir = std::env::temp_dir().join(format!("mixed-{}", user));
-        let _ = fs::create_dir_all(&fallback_dir);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&fallback_dir, fs::Permissions::from_mode(0o700));
+        if is_test {
+            std::env::temp_dir().join("mixed_test_credentials.json")
+        } else if let Some(dir) = directories::ProjectDirs::from("", "", "mixed") {
+            let path = dir.config_dir().to_path_buf();
+            let _ = fs::create_dir_all(&path);
+            path.join("credentials.json")
+        } else {
+            let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
+            let fallback_dir = std::env::temp_dir().join(format!("mixed-{}", user));
+            let _ = fs::create_dir_all(&fallback_dir);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&fallback_dir, fs::Permissions::from_mode(0o700));
+            }
+            fallback_dir.join("credentials.json")
         }
-        fallback_dir.join("credentials.json")
     }
 }
 

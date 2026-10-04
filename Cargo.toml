@@ -65,6 +65,7 @@ librespot-oauth = { version = "0.8", default-features = false, features = ["rust
 librespot-metadata = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
 
 rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
+log = "0.4.34"
 
 [features]
 default = ["spotify", "youtube"]

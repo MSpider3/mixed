@@ -137,7 +137,11 @@ fn build_session_and_player(
     let _ = std::fs::create_dir_all(&cache_dir);
     let cache = Cache::new(Some(&cache_dir), None, Some(&cache_dir), None).ok();
 
-    let session = Session::new(SessionConfig::default(), cache);
+    let session_config = SessionConfig {
+        client_id: crate::sources::spotify::DEFAULT_SPOTIFY_CLIENT_ID.to_string(),
+        ..Default::default()
+    };
+    let session = Session::new(session_config, cache);
 
     let writer_clone = writer_holder.clone();
     let stopped_clone = stopped.clone();
@@ -176,8 +180,14 @@ fn build_session_and_player(
                     }
                 }
                 PlayerEvent::Unavailable { .. } => {
+                    let mut cache_dir = directories::ProjectDirs::from("", "", "mixed")
+                        .map(|d| d.cache_dir().to_path_buf())
+                        .unwrap_or_else(std::env::temp_dir);
+                    cache_dir.push("spotify");
+                    let _ = std::fs::remove_file(cache_dir.join("credentials.json"));
+
                     if let Ok(mut f) = failure_for_events.lock() {
-                        *f = Some("Track is unavailable on Spotify".to_string());
+                        *f = Some("Track is unavailable on Spotify (or session expired, please re-authenticate)".to_string());
                     }
                 }
                 _ => {}
