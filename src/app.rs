@@ -1865,21 +1865,39 @@ impl App {
 
         if let Some(item) = item {
             if item.is_container {
-                // Enter toggles a container: collapse it if open, otherwise load it
-                let collapsed = self
-                    .active_source_view_mut()
-                    .is_some_and(|v| v.collapse(&item.id));
-                if collapsed {
-                    self.refresh_needed = true;
-                    return;
+                // If the container is expanded, enqueue all its tracks
+                let mut tracks_to_enqueue = Vec::new();
+                if let Some(view) = self.active_source_view() {
+                    if view.expanded.contains(&item.id) {
+                        let list = if panel == ActivePanel::Search { &view.search_results } else { &view.flat };
+                        if let Some(idx) = list.iter().position(|it| it.id == item.id) {
+                            let depth = list[idx].depth;
+                            for child in list.iter().skip(idx + 1) {
+                                if child.depth <= depth {
+                                    break;
+                                }
+                                if let Some(tr) = &child.track_ref {
+                                    let meta = crate::data::metadata::TrackMetadata {
+                                        title: Some(child.title.clone()),
+                                        artist: child.subtitle.clone(),
+                                        duration: child.duration_secs.map(std::time::Duration::from_secs),
+                                        cover_url: child.artwork_url.clone(),
+                                        ..Default::default()
+                                    };
+                                    tracks_to_enqueue.push((tr.clone(), meta));
+                                }
+                            }
+                        }
+                    }
                 }
-                if let Some(ref rt) = self.source_runtime {
-                    let _ = rt.send(crate::sources::SourceRequest::FetchChildren {
-                        source,
-                        parent_id: item.id.clone(),
-                        page: 0,
-                    });
+                
+                if tracks_to_enqueue.is_empty() {
+                    self.set_status("Open the folder first (Space) to load its songs for enqueueing.");
+                } else {
+                    self.toggle_enqueue_tracks(&tracks_to_enqueue, play_now);
+                    self.set_status(&format!("Enqueued {} tracks", tracks_to_enqueue.len()));
                 }
+                self.refresh_needed = true;
             } else if let Some(tr) = item.track_ref {
                 let meta = crate::data::metadata::TrackMetadata {
                     title: Some(item.title),

@@ -849,14 +849,14 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
                 let s = if is_cursor {
                     Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(C_CYAN)
+                    Style::default().fg(C_FG)
                 };
                 (dir_icon, s)
             } else {
                 let s = if is_cursor {
-                    Style::default().fg(C_FG).add_modifier(Modifier::BOLD)
+                    Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(C_DIM)
+                    Style::default().fg(C_FG)
                 };
                 ("♪  ", s)
             };
@@ -1010,7 +1010,7 @@ fn browse_row<'a>(
         .is_some_and(|tr| playlist.entry_ids.contains(tr));
 
     let style = if item.is_container {
-        let s = Style::default().fg(C_CYAN);
+        let s = Style::default().fg(if is_cursor { C_CYAN } else { C_FG });
         if is_cursor {
             s.add_modifier(Modifier::BOLD)
         } else {
