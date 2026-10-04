@@ -54,6 +54,7 @@ pub enum PlayerCmd {
     Seek(u64),
     Stop,
     SetVolume(u8),
+    PreloadSpotify(String),
 }
 
 /// Unified audio backend router.
@@ -311,6 +312,11 @@ impl Player {
                     Ok(PlayerCmd::SetVolume(vol)) => {
                         backend.set_volume(vol);
                     }
+                    Ok(PlayerCmd::PreloadSpotify(uri)) => {
+                        if current_is_spotify {
+                            spotify_backend.preload(&uri);
+                        }
+                    }
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                         break;
                     }
@@ -528,5 +534,9 @@ impl Player {
 
     pub fn current_sample_rate(&self) -> u32 {
         self.current_sample_rate.load(Ordering::Relaxed)
+    }
+
+    pub fn preload_spotify(&self, uri: String) {
+        let _ = self.cmd_tx.send(PlayerCmd::PreloadSpotify(uri));
     }
 }

@@ -30,6 +30,9 @@ use librespot_playback::mixer::NoOpVolume;
 use librespot_playback::player::Player as LibrespotPlayer;
 
 #[cfg(feature = "spotify")]
+const SPOTIFY_BUFFER_CAPACITY: usize = 131_072;
+
+#[cfg(feature = "spotify")]
 struct LibrespotPcmSink {
     writer: Arc<Mutex<PcmWriter>>,
     stopped: Arc<AtomicBool>,
@@ -50,18 +53,19 @@ impl Sink for LibrespotPcmSink {
     fn write(&mut self, packet: AudioPacket, _converter: &mut Converter) -> SinkResult<()> {
         if let AudioPacket::Samples(samples) = packet {
             let mut idx = 0;
+            let mut batch = [0.0f32; 512];
             while idx < samples.len() && !self.stopped.load(Ordering::Acquire) {
-                let sample_f32 = samples[idx] as f32;
-                let res = {
-                    if let Ok(writer) = self.writer.lock() {
-                        writer.push(sample_f32)
-                    } else {
-                        break;
-                    }
-                };
-                if res.is_ok() {
-                    idx += 1;
+                let chunk_size = (samples.len() - idx).min(batch.len());
+                for i in 0..chunk_size {
+                    batch[i] = samples[idx + i] as f32;
+                }
+                let written = if let Ok(writer) = self.writer.lock() {
+                    writer.push_slice(&batch[..chunk_size])
                 } else {
+                    break;
+                };
+                idx += written;
+                if written < chunk_size {
                     // Backpressure: sleep briefly to let the audio engine consume samples
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
@@ -95,6 +99,9 @@ pub struct SpotifyBackend {
     /// Latest playback position (ms) reported by librespot, not yet consumed.
     #[cfg(feature = "spotify")]
     position: Arc<Mutex<Option<u64>>>,
+    /// Currently loaded track URI, guarding against race conditions in EndOfTrack.
+    #[cfg(feature = "spotify")]
+    active_track: Arc<Mutex<Option<SpotifyUri>>>,
     pcm_source: Option<PcmSource>,
 }
 
@@ -117,6 +124,49 @@ fn stored_access_token() -> Option<String> {
     }
 }
 
+/// Refresh the stored access token via OAuth and persist the new token.
+#[cfg(feature = "spotify")]
+async fn refresh_access_token_now() -> Result<String, String> {
+    let creds = crate::config::credentials::Credentials::load();
+    let client_id = creds
+        .spotify_client_id
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::sources::spotify::DEFAULT_SPOTIFY_CLIENT_ID.to_string());
+    let token_cache = creds
+        .spotify_token_cache
+        .ok_or_else(|| "No token cache found in credentials.json".to_string())?;
+
+    let refresh_tok = match serde_json::from_str::<serde_json::Value>(&token_cache) {
+        Ok(val) => val
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+        Err(_) => None,
+    }
+    .ok_or_else(|| "No refresh_token in credentials token cache".to_string())?;
+
+    let redirect_uri = crate::sources::spotify::redirect_uri_for_client(&client_id);
+    let oauth_client = librespot_oauth::OAuthClientBuilder::new(&client_id, redirect_uri, vec![])
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let new_token = oauth_client
+        .refresh_token_async(&refresh_tok)
+        .await
+        .map_err(|e| format!("Token refresh failed: {}", e))?;
+
+    let mut updated_creds = crate::config::credentials::Credentials::load();
+    updated_creds.spotify_client_id = Some(client_id);
+    let cache = serde_json::json!({
+        "access_token": new_token.access_token.clone(),
+        "refresh_token": new_token.refresh_token.clone(),
+    });
+    updated_creds.spotify_token_cache = Some(cache.to_string());
+    let _ = updated_creds.save();
+
+    Ok(new_token.access_token)
+}
+
 /// Build a librespot session and player bound to `rt`, plus the task that maps
 /// librespot player events onto the PCM writer and the failure slot.
 #[cfg(feature = "spotify")]
@@ -126,6 +176,7 @@ fn build_session_and_player(
     stopped: &Arc<AtomicBool>,
     failure: &Arc<Mutex<Option<String>>>,
     position: &Arc<Mutex<Option<u64>>>,
+    active_track: &Arc<Mutex<Option<SpotifyUri>>>,
 ) -> (Session, Arc<LibrespotPlayer>) {
     // Session::new captures the current Tokio handle, so it must run inside the runtime.
     let _guard = rt.enter();
@@ -150,8 +201,14 @@ fn build_session_and_player(
 
     let writer_clone = writer_holder.clone();
     let stopped_clone = stopped.clone();
+    let player_config = PlayerConfig {
+        bitrate: librespot_playback::config::Bitrate::Bitrate320,
+        gapless: true,
+        position_update_interval: Some(std::time::Duration::from_millis(500)),
+        ..Default::default()
+    };
     let player = LibrespotPlayer::new(
-        PlayerConfig::default(),
+        player_config,
         session.clone(),
         Box::new(NoOpVolume),
         move || -> Box<dyn Sink> {
@@ -165,21 +222,29 @@ fn build_session_and_player(
     let writer_for_events = writer_holder.clone();
     let failure_for_events = failure.clone();
     let position_for_events = position.clone();
+    let active_track_for_events = active_track.clone();
     let mut events = player.get_player_event_channel();
     rt.spawn(async move {
         use librespot_playback::player::PlayerEvent;
         while let Some(event) = events.recv().await {
             match event {
-                PlayerEvent::EndOfTrack { .. } => {
+                PlayerEvent::EndOfTrack { track_id, .. } => {
+                    if let Ok(cur) = active_track_for_events.lock() {
+                        if cur.as_ref() != Some(&track_id) {
+                            log::debug!("Ignoring EndOfTrack for non-active track {:?}", track_id);
+                            continue;
+                        }
+                    }
                     if let Ok(w) = writer_for_events.lock() {
                         w.set_ended(true);
                     }
                 }
-                // Audio starts (or resumes, or jumps) at this position: the UI clock
+                // Audio starts (or resumes, or jumps, or advances) at this position: the UI clock
                 // is synchronised to it instead of running from the load request.
                 PlayerEvent::Playing { position_ms, .. }
                 | PlayerEvent::Seeked { position_ms, .. }
-                | PlayerEvent::PositionCorrection { position_ms, .. } => {
+                | PlayerEvent::PositionCorrection { position_ms, .. }
+                | PlayerEvent::PositionChanged { position_ms, .. } => {
                     if let Ok(mut p) = position_for_events.lock() {
                         *p = Some(u64::from(position_ms));
                     }
@@ -209,7 +274,11 @@ fn build_session_and_player(
 
 impl SpotifyBackend {
     pub fn new() -> Self {
+        #[cfg(feature = "spotify")]
+        let (source, _writer) = PcmSource::new(2, 44100, SPOTIFY_BUFFER_CAPACITY);
+        #[cfg(not(feature = "spotify"))]
         let (source, _writer) = PcmSource::new(2, 44100, 32768);
+
         #[cfg(feature = "spotify")]
         {
             // Dedicated single-worker Tokio runtime for librespot internals
@@ -224,11 +293,18 @@ impl SpotifyBackend {
             let stopped = Arc::new(AtomicBool::new(false));
             let failure = Arc::new(Mutex::new(None));
             let position = Arc::new(Mutex::new(None));
+            let active_track = Arc::new(Mutex::new(None));
 
             let (session, player) = match rt.as_ref() {
                 Some(rt) => {
-                    let (s, p) =
-                        build_session_and_player(rt, &writer_holder, &stopped, &failure, &position);
+                    let (s, p) = build_session_and_player(
+                        rt,
+                        &writer_holder,
+                        &stopped,
+                        &failure,
+                        &position,
+                        &active_track,
+                    );
                     (Some(s), Some(p))
                 }
                 None => (None, None),
@@ -243,6 +319,7 @@ impl SpotifyBackend {
                 connected: false,
                 failure,
                 position,
+                active_track,
                 pcm_source: Some(source),
             }
         }
@@ -270,6 +347,7 @@ impl SpotifyBackend {
                 &self.stopped,
                 &self.failure,
                 &self.position,
+                &self.active_track,
             );
             self.session = Some(session);
             self.player = Some(player);
@@ -328,18 +406,20 @@ impl SpotifyBackend {
             }
         }
 
-        // Token may have just been refreshed in credentials.json by network thread; re-check once
-        if let Some(token) = stored_access_token() {
-            log::debug!("Re-checking streaming connect with fresh credentials token");
+        // Candidates may have expired; attempt on-demand OAuth token refresh and retry connect
+        log::debug!("Attempting on-demand token refresh for Spotify streaming session");
+        if let Ok(new_token) = rt.block_on(refresh_access_token_now()) {
             let session = session.clone();
-            let creds = Credentials::with_access_token(token);
+            let creds = Credentials::with_access_token(new_token);
             let res = rt.block_on(async move {
                 tokio::time::timeout(CONNECT_TIMEOUT, session.connect(creds, true)).await
             });
             if let Ok(Ok(())) = res {
-                log::info!("Spotify streaming session connected on reload retry");
+                log::info!("Spotify streaming session connected after refreshing token");
                 self.connected = true;
                 return Ok(());
+            } else if let Ok(Err(e)) = res {
+                last_err = e.to_string();
             }
         }
 
@@ -380,7 +460,11 @@ impl SpotifyBackend {
         if let Some(source) = self.pcm_source.take() {
             source
         } else {
+            #[cfg(feature = "spotify")]
+            let (source, writer) = PcmSource::new(2, 44100, SPOTIFY_BUFFER_CAPACITY);
+            #[cfg(not(feature = "spotify"))]
             let (source, writer) = PcmSource::new(2, 44100, 32768);
+
             #[cfg(feature = "spotify")]
             if let Ok(mut w) = self.writer_holder.lock() {
                 *w = writer;
@@ -388,6 +472,27 @@ impl SpotifyBackend {
             #[cfg(not(feature = "spotify"))]
             let _ = writer;
             source
+        }
+    }
+
+    pub fn preload(&self, uri: &str) {
+        #[cfg(feature = "spotify")]
+        {
+            if let Some(ref player) = self.player {
+                let track_uri = if uri.starts_with("spotify:track:") {
+                    SpotifyUri::from_uri(uri)
+                } else {
+                    SpotifyUri::from_uri(&format!("spotify:track:{}", uri))
+                };
+                if let Ok(uri) = track_uri {
+                    log::debug!("Preloading next Spotify track: {:?}", uri);
+                    player.preload(uri);
+                }
+            }
+        }
+        #[cfg(not(feature = "spotify"))]
+        {
+            let _ = uri;
         }
     }
 
@@ -404,7 +509,7 @@ impl SpotifyBackend {
             self.ensure_connected()?;
 
             // Fresh source/writer pair for this track load
-            let (new_source, new_writer) = PcmSource::new(2, 44100, 32768);
+            let (new_source, new_writer) = PcmSource::new(2, 44100, SPOTIFY_BUFFER_CAPACITY);
             if let Ok(mut w) = self.writer_holder.lock() {
                 w.flush();
                 *w = new_writer;
@@ -416,6 +521,9 @@ impl SpotifyBackend {
             }
             if let Ok(mut p) = self.position.lock() {
                 *p = None;
+            }
+            if let Ok(mut cur) = self.active_track.lock() {
+                *cur = Some(track_uri.clone());
             }
 
             let Some(ref player) = self.player else {
@@ -465,6 +573,9 @@ impl SpotifyBackend {
         #[cfg(feature = "spotify")]
         {
             self.stopped.store(true, Ordering::Release);
+            if let Ok(mut cur) = self.active_track.lock() {
+                *cur = None;
+            }
             if let Ok(w) = self.writer_holder.lock() {
                 w.flush();
             }

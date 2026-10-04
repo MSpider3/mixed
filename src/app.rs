@@ -157,6 +157,7 @@ pub struct App {
     pub source_event_rx: Option<crossbeam_channel::Receiver<crate::sources::SourceEvent>>,
     pub remote_search_pending: Option<(String, std::time::Instant)>,
     pub prefetched_video_id: Option<String>,
+    pub prefetched_spotify_uri: Option<String>,
     /// Set while the current YouTube track plays from a partial download.
     pub streaming: Option<StreamingTrack>,
 
@@ -309,6 +310,7 @@ impl App {
             source_event_rx: None,
             remote_search_pending: None,
             prefetched_video_id: None,
+            prefetched_spotify_uri: None,
             streaming: None,
             vis_wake_tx: Some(vis_wake_tx),
             force_terminal_clear: false,
@@ -1172,6 +1174,7 @@ impl App {
     pub fn play_current(&mut self) {
         self.stopped = false;
         self.prefetched_video_id = None;
+        self.prefetched_spotify_uri = None;
         self.streaming = None;
         self.lyrics_scroll = 0;
         self.pending_seek = None;
@@ -1579,24 +1582,36 @@ impl App {
 
         // Auto-advance is handled event-driven via PlayerEvent::Finished (Phase 3)
 
-        // Prefetch next YouTube track if current track progress > 50%
+        // Prefetch next YouTube track or preload next Spotify track if current track progress > 50%
         let duration = self.player.as_ref().map(|p| p.duration_ms()).unwrap_or(0);
         let elapsed = self.player.as_ref().map(|p| p.elapsed_ms()).unwrap_or(0);
         if duration > 0 && elapsed * 2 >= duration {
             if let Some(next_entry) = self.playlist.peek_next_entry() {
-                if let TrackRef::YouTube(ref next_vid) = next_entry.id {
-                    if self.prefetched_video_id.as_deref() != Some(next_vid.as_str())
-                        && crate::sources::ytdlp::YtDlp::find_cached(next_vid).is_none()
-                    {
-                        self.prefetched_video_id = Some(next_vid.clone());
-                        if let Some(ref runtime) = self.source_runtime {
-                            let _ =
-                                runtime.send(crate::sources::SourceRequest::DownloadYouTubeTrack {
-                                    video_id: next_vid.clone(),
-                                    generation: 0,
-                                });
+                match next_entry.id {
+                    TrackRef::YouTube(ref next_vid) => {
+                        if self.prefetched_video_id.as_deref() != Some(next_vid.as_str())
+                            && crate::sources::ytdlp::YtDlp::find_cached(next_vid).is_none()
+                        {
+                            self.prefetched_video_id = Some(next_vid.clone());
+                            if let Some(ref runtime) = self.source_runtime {
+                                let _ = runtime.send(
+                                    crate::sources::SourceRequest::DownloadYouTubeTrack {
+                                        video_id: next_vid.clone(),
+                                        generation: 0,
+                                    },
+                                );
+                            }
                         }
                     }
+                    TrackRef::Spotify(ref uri)
+                        if self.prefetched_spotify_uri.as_deref() != Some(uri.as_str()) =>
+                    {
+                        self.prefetched_spotify_uri = Some(uri.clone());
+                        if let Some(ref player) = self.player {
+                            player.preload_spotify(uri.clone());
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2135,6 +2150,7 @@ impl App {
     pub fn clear_playlist(&mut self) {
         self.playlist.clear();
         self.prefetched_video_id = None;
+        self.prefetched_spotify_uri = None;
         if let Some(p) = self.player.as_mut() {
             p.stop()
         };

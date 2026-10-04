@@ -91,7 +91,20 @@ impl SourceRuntime {
                     let ytdlp = crate::sources::ytdlp::YtDlp::new(yt_dlp_path);
                     let in_flight_downloads: InFlightDownloads = Arc::default();
 
+                    let mut last_spotify_refresh = std::time::Instant::now();
+
                     while !shutdown_clone.load(Ordering::Relaxed) {
+                        // Periodically ensure token stays fresh (every 15 minutes)
+                        if last_spotify_refresh.elapsed() >= std::time::Duration::from_secs(15 * 60)
+                        {
+                            last_spotify_refresh = std::time::Instant::now();
+                            let spotify_client = spotify_client.clone();
+                            tokio::spawn(async move {
+                                let mut sp = spotify_client.lock().await;
+                                sp.ensure_fresh_token().await;
+                            });
+                        }
+
                         // Receive request or poll shutdown every 100ms
                         let req =
                             match request_rx.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -177,7 +190,8 @@ async fn handle_request(
     match req {
         SourceRequest::CheckAuth(source) => match source {
             SourceTab::Spotify => {
-                let sp = spotify_client.lock().await;
+                let mut sp = spotify_client.lock().await;
+                sp.ensure_fresh_token().await;
                 let connected = sp.is_authenticated();
                 let user_name = sp.user_name().map(|s| s.to_string());
                 let error = if !connected {

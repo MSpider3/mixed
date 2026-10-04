@@ -86,6 +86,18 @@ struct SpotifySavedAlbumItem {
 
 #[cfg(feature = "spotify")]
 #[derive(Debug, Deserialize)]
+struct SpotifyRecentlyPlayedResponse {
+    items: Vec<SpotifyRecentlyPlayedItem>,
+}
+
+#[cfg(feature = "spotify")]
+#[derive(Debug, Deserialize)]
+struct SpotifyRecentlyPlayedItem {
+    track: SpotifyTrack,
+}
+
+#[cfg(feature = "spotify")]
+#[derive(Debug, Deserialize)]
 struct SpotifyPlaylistTrackItem {
     /// Current field name; holds a track or an episode object.
     item: Option<serde_json::Value>,
@@ -335,6 +347,8 @@ impl SpotifyClient {
             "playlist-read-collaborative",
             "user-library-read",
             "user-read-private",
+            "user-read-recently-played",
+            "user-top-read",
         ];
 
         let oauth_client =
@@ -530,6 +544,28 @@ impl SpotifyClient {
                     depth: 0,
                 },
                 BrowseItem {
+                    id: "spotify:recently_played".into(),
+                    title: "Recently Played".into(),
+                    subtitle: Some("Your history".into()),
+                    kind: BrowseItemKind::Playlist,
+                    is_container: true,
+                    track_ref: None,
+                    duration_secs: None,
+                    artwork_url: None,
+                    depth: 0,
+                },
+                BrowseItem {
+                    id: "spotify:top_tracks".into(),
+                    title: "Top Tracks".into(),
+                    subtitle: Some("Your favorites".into()),
+                    kind: BrowseItemKind::Playlist,
+                    is_container: true,
+                    track_ref: None,
+                    duration_secs: None,
+                    artwork_url: None,
+                    depth: 0,
+                },
+                BrowseItem {
                     id: "spotify:library_playlists".into(),
                     title: "Playlists".into(),
                     subtitle: Some("Your library".into()),
@@ -611,6 +647,106 @@ impl SpotifyClient {
         let Some(ref token) = self.access_token else {
             return Err("Spotify access token missing".into());
         };
+
+        if parent_id == "spotify:recently_played" {
+            let url = "https://api.spotify.com/v1/me/player/recently-played?limit=50";
+            let resp = self.fetch_page_with_retry(url, token).await?;
+            if resp.status() == reqwest::StatusCode::FORBIDDEN {
+                return Err("Missing permissions. Sign out and log in again to grant recently played access.".into());
+            }
+            if !resp.status().is_success() {
+                return Err(format!(
+                    "Failed to fetch recently played: HTTP {}",
+                    resp.status()
+                ));
+            }
+            let data = resp
+                .json::<SpotifyRecentlyPlayedResponse>()
+                .await
+                .map_err(|e| e.to_string())?;
+            let items: Vec<_> = data
+                .items
+                .into_iter()
+                .map(|item| {
+                    let track = item.track;
+                    let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
+                    let cover = track
+                        .album
+                        .as_ref()
+                        .and_then(|alb| best_image(alb.images.as_deref()));
+                    BrowseItem {
+                        id: format!("spotify:track:{}", track.id),
+                        title: track.name,
+                        subtitle: Some(artists.join(", ")),
+                        kind: BrowseItemKind::Track,
+                        is_container: false,
+                        track_ref: Some(TrackRef::Spotify(track.uri)),
+                        duration_secs: Some(track.duration_ms / 1000),
+                        artwork_url: cover,
+                        depth: 0,
+                    }
+                })
+                .collect();
+            let _ = event_tx.send(SourceEvent::Children {
+                source,
+                parent_id: parent_id.to_string(),
+                items,
+                page: 0,
+                has_more: false,
+            });
+            return Ok(());
+        }
+
+        if parent_id == "spotify:top_tracks" {
+            let url = "https://api.spotify.com/v1/me/top/tracks?limit=50";
+            let resp = self.fetch_page_with_retry(url, token).await?;
+            if resp.status() == reqwest::StatusCode::FORBIDDEN {
+                return Err(
+                    "Missing permissions. Sign out and log in again to grant top tracks access."
+                        .into(),
+                );
+            }
+            if !resp.status().is_success() {
+                return Err(format!(
+                    "Failed to fetch top tracks: HTTP {}",
+                    resp.status()
+                ));
+            }
+            let data = resp
+                .json::<SpotifyPaging<SpotifyTrack>>()
+                .await
+                .map_err(|e| e.to_string())?;
+            let items: Vec<_> = data
+                .items
+                .into_iter()
+                .map(|track| {
+                    let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
+                    let cover = track
+                        .album
+                        .as_ref()
+                        .and_then(|alb| best_image(alb.images.as_deref()));
+                    BrowseItem {
+                        id: format!("spotify:track:{}", track.id),
+                        title: track.name,
+                        subtitle: Some(artists.join(", ")),
+                        kind: BrowseItemKind::Track,
+                        is_container: false,
+                        track_ref: Some(TrackRef::Spotify(track.uri)),
+                        duration_secs: Some(track.duration_ms / 1000),
+                        artwork_url: cover,
+                        depth: 0,
+                    }
+                })
+                .collect();
+            let _ = event_tx.send(SourceEvent::Children {
+                source,
+                parent_id: parent_id.to_string(),
+                items,
+                page: 0,
+                has_more: false,
+            });
+            return Ok(());
+        }
 
         if parent_id == "spotify:liked_songs" {
             let mut current_offset = 0;
@@ -1008,5 +1144,51 @@ impl SpotifyClient {
 impl crate::sources::MusicSource for SpotifyClient {
     fn name(&self) -> &'static str {
         "Spotify"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spotify_client_id_and_redirect_uri() {
+        assert_eq!(
+            DEFAULT_SPOTIFY_CLIENT_ID,
+            "65b708073fc0480ea92a077233ca87bd"
+        );
+        #[cfg(feature = "spotify")]
+        {
+            assert_eq!(
+                redirect_uri_for_client(DEFAULT_SPOTIFY_CLIENT_ID),
+                DEFAULT_SPOTIFY_REDIRECT_URI
+            );
+            assert_eq!(
+                redirect_uri_for_client("custom-client-id"),
+                "http://127.0.0.1:8898/login"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "spotify")]
+    fn test_library_roots_structure() {
+        let client = SpotifyClient {
+            client_id: Some("id".into()),
+            access_token: Some("token".into()),
+            refresh_token: Some("refresh".into()),
+            user_name: Some("Test User".into()),
+            is_premium: true,
+            token_issued_at: None,
+            last_error: None,
+            http: reqwest::Client::new(),
+        };
+        let roots = client.library_roots();
+        let root_ids: Vec<_> = roots.iter().map(|r| r.id.as_str()).collect();
+        assert!(root_ids.contains(&"spotify:liked_songs"));
+        assert!(root_ids.contains(&"spotify:recently_played"));
+        assert!(root_ids.contains(&"spotify:top_tracks"));
+        assert!(root_ids.contains(&"spotify:library_playlists"));
+        assert!(root_ids.contains(&"spotify:library_albums"));
     }
 }
