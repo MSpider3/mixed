@@ -1717,7 +1717,11 @@ fn test_remote_browse_space_toggles_container_expansion() {
         ],
     });
 
-    // The reply to "open" nests the children one level below their parent
+    // Space on the container drills down ("cd") into the folder
+    app.youtube_view.cursor = 0;
+    app.toggle_container_expansion();
+
+    // The reply to children populates the folder view
     app.handle_source_event(SourceEvent::Children {
         source: SourceTab::YouTube,
         parent_id: "yt:library_playlists".into(),
@@ -1725,12 +1729,21 @@ fn test_remote_browse_space_toggles_container_expansion() {
         page: 0,
         has_more: false,
     });
-    let depths: Vec<usize> = app.youtube_view.flat.iter().map(|it| it.depth).collect();
-    assert_eq!(depths, vec![0, 1, 1, 0]);
 
-    // Space on the open container closes it again
-    app.youtube_view.cursor = 0;
-    app.toggle_container_expansion();
     assert_eq!(app.youtube_view.flat.len(), 2);
-    assert!(app.youtube_view.expanded.is_empty());
+    assert_eq!(app.youtube_view.flat[0].id, "yt:playlist:a");
+    assert_eq!(app.youtube_view.flat[1].id, "yt:playlist:b");
+    assert_eq!(app.youtube_view.nav_stack.len(), 1);
+    assert_eq!(
+        app.youtube_view.current_path_display("YouTube Music"),
+        "📁 YouTube Music / yt:library_playlists"
+    );
+
+    // Backspace / navigate up ("cd ..") returns to parent directory list
+    assert!(app.navigate_folder_up());
+    assert_eq!(app.youtube_view.flat.len(), 2);
+    assert_eq!(app.youtube_view.flat[0].id, "yt:library_playlists");
+    assert_eq!(app.youtube_view.flat[1].id, "yt:library_albums");
+    assert!(app.youtube_view.nav_stack.is_empty());
+    assert_eq!(app.youtube_view.cursor, 0);
 }

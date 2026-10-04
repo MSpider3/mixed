@@ -30,13 +30,18 @@ pub fn credentials_path() -> PathBuf {
     }
     #[cfg(not(test))]
     {
-        let is_test = std::env::current_exe()
-            .ok()
-            .map(|p| {
-                let s = p.to_string_lossy().into_owned();
-                s.contains("deps") || s.contains("test") || s.contains("mpris")
-            })
-            .unwrap_or(false);
+        let is_test = std::env::var_os("MIXED_TEST").is_some()
+            || std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .map(|name| {
+                    name.starts_with("mixed-")
+                        || name.contains("test_")
+                        || name == "tests"
+                        || name.contains("headless")
+                        || name.contains("mpris")
+                })
+                .unwrap_or(false);
 
         if is_test {
             std::env::temp_dir().join("mixed_test_credentials.json")

@@ -87,6 +87,8 @@ pub struct App {
     pub collapsed_dirs: std::collections::HashSet<std::path::PathBuf>,
     pub library_loading: bool,
     pub library_rx: Option<crossbeam_channel::Receiver<Vec<LibraryEntry>>>,
+    pub local_nav_stack: Vec<(std::path::PathBuf, String, usize)>,
+    pub pending_container_enqueue: Option<(String, bool)>,
 
     // -- UI State --
     pub active_panel: ActivePanel,
@@ -243,6 +245,8 @@ impl App {
             collapsed_dirs: std::collections::HashSet::new(),
             library_loading: false,
             library_rx: None,
+            local_nav_stack: Vec::new(),
+            pending_container_enqueue: None,
             active_panel: ActivePanel::Library,
             queue_cursor: 0,
             library_cursor: 0,
@@ -657,10 +661,35 @@ impl App {
                 ..
             } => {
                 if let Some(view) = self.source_view_mut(source) {
-                    view.expand(&parent_id, items);
+                    view.expand(&parent_id, items.clone());
                     view.loading = false;
-                    self.refresh_needed = true;
                 }
+                if let Some((pending_id, play_now)) = self.pending_container_enqueue.take() {
+                    if pending_id == parent_id {
+                        let tracks: Vec<(TrackRef, TrackMetadata)> = items
+                            .into_iter()
+                            .filter_map(|it| {
+                                let tr = it.track_ref?;
+                                let meta = TrackMetadata {
+                                    title: Some(it.title),
+                                    artist: it.subtitle,
+                                    duration: it.duration_secs.map(std::time::Duration::from_secs),
+                                    cover_url: it.artwork_url,
+                                    ..Default::default()
+                                };
+                                Some((tr, meta))
+                            })
+                            .collect();
+                        if !tracks.is_empty() {
+                            let count = tracks.len();
+                            self.toggle_enqueue_tracks(&tracks, play_now);
+                            self.set_status(format!("Enqueued {} tracks", count));
+                        }
+                    } else {
+                        self.pending_container_enqueue = Some((pending_id, play_now));
+                    }
+                }
+                self.refresh_needed = true;
             }
             SourceEvent::SearchResults {
                 source,
@@ -817,39 +846,73 @@ impl App {
         }
     }
 
-    /// Rebuild only the UI-visible flat library (respects collapsed_dirs and
-    /// the current playlist's enqueue state). Called on expand/collapse and
-    /// whenever the playlist changes. O(N_visible_items).
+    /// Returns the entries for the currently active directory in local browsing.
+    pub fn current_local_entries(&self) -> &[LibraryEntry] {
+        let mut cur = self.library.as_slice();
+        for (path, _, _) in &self.local_nav_stack {
+            let mut found = None;
+            for entry in cur {
+                if let LibraryEntry::Directory {
+                    path: p, children, ..
+                } = entry
+                {
+                    if p == path {
+                        found = Some(children.as_slice());
+                        break;
+                    }
+                }
+            }
+            if let Some(children) = found {
+                cur = children;
+            } else {
+                return &[];
+            }
+        }
+        cur
+    }
+
+    /// Returns the breadcrumb string for the current local directory navigation state.
+    pub fn current_local_path_display(&self) -> String {
+        if self.local_nav_stack.is_empty() {
+            "📁 Local Library".to_string()
+        } else {
+            let trail = self
+                .local_nav_stack
+                .iter()
+                .map(|(_, name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            format!("📁 Local / {}", trail)
+        }
+    }
+
+    /// Rebuild only the UI-visible flat library (respects current directory level and
+    /// the current playlist's enqueue state).
     pub fn rebuild_flat_library_view(&mut self) {
-        self.flat_library = library::flatten_library(
-            &self.library,
-            0,
-            Vec::new(),
-            &self.collapsed_dirs,
-            &self.playlist.entry_ids,
-        );
+        let entries = self.current_local_entries().to_vec();
+        self.flat_library = entries
+            .into_iter()
+            .map(|entry| {
+                let enqueued = entry.all_tracks_enqueued(&self.playlist.entry_ids);
+                library::FlatLibraryItem {
+                    entry,
+                    depth: 0,
+                    is_last: false,
+                    ancestor_last: Vec::new(),
+                    enqueued,
+                }
+            })
+            .collect();
         if self.library_cursor > self.flat_library.len() {
             self.library_cursor = self.flat_library.len();
         }
     }
 
     /// Rebuild BOTH flat views. Called only when the raw library data changes
-    /// (initial cache load or background scan completion). The full_flat_library
-    /// (no collapsed dirs) is expensive to recompute for large trees, so we
-    /// avoid doing it on every expand/collapse or playlist mutation. O(N_total).
+    /// (initial cache load or background scan completion).
     pub fn rebuild_flat_library(&mut self) {
-        self.flat_library = library::flatten_library(
-            &self.library,
-            0,
-            Vec::new(),
-            &self.collapsed_dirs,
-            &self.playlist.entry_ids,
-        );
-        if self.library_cursor > self.flat_library.len() {
-            self.library_cursor = self.flat_library.len();
-        }
+        self.rebuild_flat_library_view();
         // full_flat_library: fully expanded, used for instant fuzzy search.
-        // No collapsed dirs, but enqueued bools still computed from playlist.
         self.full_flat_library = library::flatten_library(
             &self.library,
             0,
@@ -1819,6 +1882,29 @@ impl App {
         self.rebuild_flat_library_view();
     }
 
+    /// Navigate up one directory level ("cd .."). Returns true if handled.
+    pub fn navigate_folder_up(&mut self) -> bool {
+        if self.active_panel != ActivePanel::Library {
+            return false;
+        }
+        if self.source == SourceTab::Local {
+            if let Some((_, _, saved_cursor)) = self.local_nav_stack.pop() {
+                self.rebuild_flat_library_view();
+                self.library_cursor = saved_cursor.min(self.flat_library.len().max(1));
+                self.refresh_needed = true;
+                return true;
+            }
+        } else if self.source == SourceTab::Spotify || self.source == SourceTab::YouTube {
+            if let Some(view) = self.active_source_view_mut() {
+                if view.navigate_up() {
+                    self.refresh_needed = true;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn toggle_container_expansion(&mut self) -> bool {
         if self.active_panel == ActivePanel::Library && self.source == SourceTab::Local {
             if self.library_cursor > 0 {
@@ -1827,11 +1913,11 @@ impl App {
                     let entry = &self.flat_library[idx].entry;
                     if entry.is_dir() {
                         let path = entry.path().to_path_buf();
-                        if self.collapsed_dirs.contains(&path) {
-                            self.expand_dir(path);
-                        } else {
-                            self.collapse_dir(path);
-                        }
+                        let name = entry.name().to_string();
+                        // Drill down ("cd") into the local directory
+                        self.local_nav_stack.push((path, name, self.library_cursor));
+                        self.library_cursor = 1;
+                        self.rebuild_flat_library_view();
                         self.refresh_needed = true;
                         return true;
                     }
@@ -1855,19 +1941,17 @@ impl App {
 
             if let Some(item) = item {
                 if item.is_container {
-                    let collapsed = self
-                        .active_source_view_mut()
-                        .is_some_and(|v| v.collapse(&item.id));
-                    if collapsed {
-                        self.refresh_needed = true;
-                        return true;
-                    }
-                    if let Some(ref rt) = self.source_runtime {
-                        let _ = rt.send(crate::sources::SourceRequest::FetchChildren {
-                            source: self.source,
-                            parent_id: item.id.clone(),
-                            page: 0,
-                        });
+                    if let Some(view) = self.active_source_view_mut() {
+                        let in_cache = view.drill_down(&item);
+                        if !in_cache {
+                            if let Some(ref rt) = self.source_runtime {
+                                let _ = rt.send(crate::sources::SourceRequest::FetchChildren {
+                                    source: self.source,
+                                    parent_id: item.id.clone(),
+                                    page: 0,
+                                });
+                            }
+                        }
                     }
                     self.refresh_needed = true;
                     return true;
@@ -1904,6 +1988,15 @@ impl App {
                                 payload: input,
                             });
                         }
+                    } else if source == SourceTab::Spotify {
+                        // Immediately launch browser OAuth with default official client ID
+                        view.loading = true;
+                        if let Some(ref rt) = self.source_runtime {
+                            let _ = rt.send(crate::sources::SourceRequest::Login {
+                                source,
+                                payload: String::new(),
+                            });
+                        }
                     } else {
                         view.awaiting_login_input = true;
                     }
@@ -1923,45 +2016,44 @@ impl App {
 
         if let Some(item) = item {
             if item.is_container {
-                // If the container is expanded, enqueue all its tracks
-                let mut tracks_to_enqueue = Vec::new();
-                if let Some(view) = self.active_source_view() {
-                    if view.expanded.contains(&item.id) {
-                        let list = if panel == ActivePanel::Search {
-                            &view.search_results
-                        } else {
-                            &view.flat
-                        };
-                        if let Some(idx) = list.iter().position(|it| it.id == item.id) {
-                            let depth = list[idx].depth;
-                            for child in list.iter().skip(idx + 1) {
-                                if child.depth <= depth {
-                                    break;
-                                }
-                                if let Some(tr) = &child.track_ref {
-                                    let meta = crate::data::metadata::TrackMetadata {
-                                        title: Some(child.title.clone()),
-                                        artist: child.subtitle.clone(),
-                                        duration: child
-                                            .duration_secs
-                                            .map(std::time::Duration::from_secs),
-                                        cover_url: child.artwork_url.clone(),
-                                        ..Default::default()
-                                    };
-                                    tracks_to_enqueue.push((tr.clone(), meta));
-                                }
-                            }
-                        }
-                    }
-                }
+                // If container tracks are cached, enqueue them immediately
+                let tracks_in_cache: Vec<(TrackRef, TrackMetadata)> = self
+                    .active_source_view()
+                    .and_then(|v| v.cache.get(&item.id))
+                    .map(|children| {
+                        children
+                            .iter()
+                            .filter_map(|child| {
+                                let tr = child.track_ref.clone()?;
+                                let meta = TrackMetadata {
+                                    title: Some(child.title.clone()),
+                                    artist: child.subtitle.clone(),
+                                    duration: child
+                                        .duration_secs
+                                        .map(std::time::Duration::from_secs),
+                                    cover_url: child.artwork_url.clone(),
+                                    ..Default::default()
+                                };
+                                Some((tr, meta))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-                if tracks_to_enqueue.is_empty() {
-                    self.set_status(
-                        "Open the folder first (Space) to load its songs for enqueueing.",
-                    );
+                if !tracks_in_cache.is_empty() {
+                    let count = tracks_in_cache.len();
+                    self.toggle_enqueue_tracks(&tracks_in_cache, play_now);
+                    self.set_status(format!("Enqueued {} tracks", count));
                 } else {
-                    self.toggle_enqueue_tracks(&tracks_to_enqueue, play_now);
-                    self.set_status(format!("Enqueued {} tracks", tracks_to_enqueue.len()));
+                    self.set_status(format!("Loading tracks for {}...", item.title));
+                    self.pending_container_enqueue = Some((item.id.clone(), play_now));
+                    if let Some(ref rt) = self.source_runtime {
+                        let _ = rt.send(crate::sources::SourceRequest::FetchChildren {
+                            source: self.source,
+                            parent_id: item.id.clone(),
+                            page: 0,
+                        });
+                    }
                 }
                 self.refresh_needed = true;
             } else if let Some(tr) = item.track_ref {

@@ -27,11 +27,7 @@ impl SourceRuntime {
 
         let creds = crate::config::credentials::Credentials::load();
         let yt_cookie = creds.youtube_cookie.clone();
-        let sp_client_id = creds
-            .spotify_client_id
-            .clone()
-            .or_else(|| config.spotify_client_id.clone())
-            .or_else(|| Some(crate::sources::spotify::DEFAULT_SPOTIFY_CLIENT_ID.to_string()));
+        let sp_client_id = Some(crate::sources::spotify::DEFAULT_SPOTIFY_CLIENT_ID.to_string());
         let (sp_access, sp_refresh) = creds
             .spotify_token_cache
             .as_deref()
@@ -40,14 +36,18 @@ impl SourceRuntime {
                     let acc = val
                         .get("access_token")
                         .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
                         .map(ToString::to_string);
                     let ref_tok = val
                         .get("refresh_token")
                         .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
                         .map(ToString::to_string);
                     (acc, ref_tok)
-                } else {
+                } else if !cache_str.trim().is_empty() {
                     (Some(cache_str.to_string()), None)
+                } else {
+                    (None, None)
                 }
             })
             .unwrap_or((None, None));

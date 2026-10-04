@@ -78,6 +78,14 @@ pub struct BrowseItem {
     pub depth: usize,
 }
 
+/// State for a directory level in the navigation stack ("cd" / "cd ..").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowseFolderState {
+    pub id: String,
+    pub title: String,
+    pub saved_cursor: usize,
+}
+
 /// State representation for remote browse and search views.
 #[derive(Debug, Clone, Default)]
 pub struct SourceView {
@@ -87,6 +95,10 @@ pub struct SourceView {
     pub flat: Vec<BrowseItem>,
     /// Ids of containers whose children are already spliced into `flat`.
     pub expanded: std::collections::HashSet<String>,
+    /// Directory navigation stack for hierarchical browsing ("cd" / "cd ..").
+    pub nav_stack: Vec<BrowseFolderState>,
+    /// In-memory cache of container children: container_id -> Vec<BrowseItem>.
+    pub cache: std::collections::HashMap<String, Vec<BrowseItem>>,
     pub cursor: usize,
     pub search_cursor: usize,
     pub loading: bool,
@@ -100,26 +112,88 @@ pub struct SourceView {
 }
 
 impl SourceView {
-    /// Insert a container's children directly below it, one level deeper, in
-    /// every list that shows the container (library tree and search results).
+    /// Returns the breadcrumb string for the current navigation state.
+    pub fn current_path_display(&self, root_name: &str) -> String {
+        if self.nav_stack.is_empty() {
+            format!("📁 {}", root_name)
+        } else {
+            let trail = self
+                .nav_stack
+                .iter()
+                .map(|s| s.title.as_str())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            format!("📁 {} / {}", root_name, trail)
+        }
+    }
+
+    /// Drill down into a folder/container ("cd"). Returns true if children were in cache.
+    pub fn drill_down(&mut self, container: &BrowseItem) -> bool {
+        self.nav_stack.push(BrowseFolderState {
+            id: container.id.clone(),
+            title: container.title.clone(),
+            saved_cursor: self.cursor,
+        });
+        if let Some(cached) = self.cache.get(&container.id).cloned() {
+            self.flat = cached;
+            self.cursor = 0;
+            self.loading = false;
+            true
+        } else {
+            self.flat.clear();
+            self.cursor = 0;
+            self.loading = true;
+            false
+        }
+    }
+
+    /// Navigate back up to the parent directory ("cd .."). Returns true if popped.
+    pub fn navigate_up(&mut self) -> bool {
+        let Some(popped) = self.nav_stack.pop() else {
+            return false;
+        };
+        if let Some(parent) = self.nav_stack.last() {
+            let parent_id = parent.id.clone();
+            self.flat = self.cache.get(&parent_id).cloned().unwrap_or_default();
+        } else {
+            self.flat = self.roots.clone();
+        }
+        self.cursor = popped.saved_cursor.min(self.flat.len().saturating_sub(1));
+        self.loading = false;
+        true
+    }
+
+    /// Insert or cache a container's children.
     pub fn expand(&mut self, parent_id: &str, children: Vec<BrowseItem>) {
-        if self.expanded.contains(parent_id) {
+        self.cache.insert(parent_id.to_string(), children.clone());
+
+        // If we navigated into this folder ("cd"), populate the active view
+        if self.nav_stack.last().map(|s| s.id.as_str()) == Some(parent_id) {
+            self.flat = children;
+            self.cursor = 0;
+            self.loading = false;
+            self.expanded.insert(parent_id.to_string());
             return;
         }
+
+        if !self.expanded.insert(parent_id.to_string()) {
+            return;
+        }
+
         let mut found = false;
         for list in [&mut self.flat, &mut self.search_results] {
             if let Some(idx) = list.iter().position(|it| it.id == parent_id) {
+                found = true;
                 let depth = list[idx].depth + 1;
                 let nested = children.iter().cloned().map(|mut child| {
                     child.depth = depth;
                     child
                 });
                 list.splice(idx + 1..idx + 1, nested);
-                found = true;
             }
         }
-        if found {
-            self.expanded.insert(parent_id.to_string());
+        if !found {
+            self.expanded.remove(parent_id);
         }
     }
 
@@ -136,7 +210,6 @@ impl SourceView {
                     .position(|it| it.depth <= depth)
                     .map_or(list.len(), |n| idx + 1 + n);
                 for removed in list.drain(idx + 1..end) {
-                    // Nested containers collapse along with their parent
                     self.expanded.remove(&removed.id);
                 }
             }

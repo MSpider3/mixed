@@ -35,13 +35,13 @@ fn render_instructions(
         },
         ActivePanel::Library => match source {
             crate::sources::SourceTab::Local => {
-                "Local Library  •  Navigate: ↑/↓/k/j  •  Expand/Enqueue: Enter  •  Search: /"
+                "Local Library  •  Enter: Play/Enqueue  •  Space/Right: Open Folder  •  Backspace/Left: Up  •  Search: /"
             }
             crate::sources::SourceTab::Spotify => {
-                "Spotify Library  •  Navigate: ↑/↓/k/j  •  Open/Close/Queue: Enter  •  Search: /"
+                "Spotify Library  •  Enter: Play/Enqueue  •  Space/Right: Open Folder  •  Backspace/Left: Up  •  Search: /"
             }
             crate::sources::SourceTab::YouTube => {
-                "YouTube Music  •  Navigate: ↑/↓/k/j  •  Open/Close/Queue: Enter  •  Search: /"
+                "YouTube Music  •  Enter: Play/Enqueue  •  Space/Right: Open Folder  •  Backspace/Left: Up  •  Search: /"
             }
             crate::sources::SourceTab::Unified => {
                 "Unified Library  •  Navigate: ↑/↓/k/j  •  Search: /"
@@ -798,14 +798,19 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
         }
     });
 
-    let header_text = if all_enqueued {
-        "*- MUSIC LIBRARY -"
+    let header_text = if app.local_nav_stack.is_empty() {
+        if all_enqueued {
+            "*- MUSIC LIBRARY -".to_string()
+        } else {
+            "  - MUSIC LIBRARY -".to_string()
+        }
     } else {
-        "  - MUSIC LIBRARY -"
+        let path_str = app.current_local_path_display();
+        format!("  - {} (Backspace: up) -", path_str)
     };
     let is_header_cursor = app.library_cursor == 0;
     let header_style = if is_header_cursor {
-        Style::default().fg(C_FG).add_modifier(Modifier::BOLD)
+        Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(C_CYAN)
     };
@@ -827,7 +832,7 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
     for i in start..end {
         if i == 0 {
             list_items.push(ListItem::new(Line::from(Span::styled(
-                header_text,
+                header_text.as_str(),
                 header_style,
             ))));
         } else {
@@ -838,14 +843,15 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
             let is_cursor = entry_cursor_idx == app.library_cursor;
 
             let enqueued = item.enqueued;
+            let is_playing = if let LibraryEntry::Track { path, .. } = entry {
+                app.playlist.current_entry().map(|e| &e.id)
+                    == Some(&crate::data::track::TrackRef::Local(path.clone()))
+            } else {
+                false
+            };
 
             let (icon, style) = if entry.is_dir() {
-                let is_collapsed = app.collapsed_dirs.contains(entry.path());
-                let dir_icon = if is_collapsed {
-                    "▶ 📁 "
-                } else {
-                    "▼ 📁 "
-                };
+                let dir_icon = "📁 ";
                 let s = if is_cursor {
                     Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)
                 } else {
@@ -853,28 +859,27 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
                 };
                 (dir_icon, s)
             } else {
-                let s = if is_cursor {
-                    Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(C_FG)
-                };
-                ("♪  ", s)
+                let s = row_style(is_cursor, is_playing);
+                let ic = if is_playing { "▶  " } else { "♪  " };
+                (ic, s)
             };
 
-            let mut line_spans = Vec::with_capacity(4 + item.ancestor_last.len());
+            let mut line_spans = Vec::new();
             line_spans.push(Span::styled(if enqueued { "  * " } else { "    " }, style));
 
-            for &ancestor_is_last in &item.ancestor_last {
-                if ancestor_is_last {
-                    line_spans.push(Span::styled("    ", style));
-                } else {
-                    line_spans.push(Span::styled("│   ", style));
+            if !item.ancestor_last.is_empty() || item.is_last {
+                for &ancestor_is_last in &item.ancestor_last {
+                    if ancestor_is_last {
+                        line_spans.push(Span::styled("    ", style));
+                    } else {
+                        line_spans.push(Span::styled("│   ", style));
+                    }
                 }
-            }
-            if item.is_last {
-                line_spans.push(Span::styled("└── ", style));
-            } else {
-                line_spans.push(Span::styled("├── ", style));
+                if item.is_last {
+                    line_spans.push(Span::styled("└── ", style));
+                } else {
+                    line_spans.push(Span::styled("├── ", style));
+                }
             }
 
             line_spans.push(Span::styled(icon, style));
@@ -996,7 +1001,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
 fn browse_row<'a>(
     item: &'a crate::sources::BrowseItem,
     is_cursor: bool,
-    expanded: &std::collections::HashSet<String>,
+    _expanded: &std::collections::HashSet<String>,
     playlist: &crate::data::playlist::Playlist,
     width: usize,
 ) -> Line<'a> {
@@ -1020,22 +1025,22 @@ fn browse_row<'a>(
         row_style(is_cursor, is_playing)
     };
     let icon = if item.is_container {
-        if expanded.contains(&item.id) {
-            "▼ 📁 "
-        } else {
-            "▶ 📁 "
-        }
+        "📁 "
     } else if is_playing {
         "▶  "
     } else {
         "♪  "
     };
     let marker = if enqueued { "  * " } else { "    " };
-    let indent = "    ".repeat(item.depth);
+    let indent = if item.depth > 0 {
+        "    ".repeat(item.depth)
+    } else {
+        String::new()
+    };
 
     // The title has priority; the subtitle only uses what is left of the row.
-    // marker (4) + indent + icon (5 cells) + scrollbar column
-    let title_room = width.saturating_sub(4 + indent.len() + 5 + 1);
+    // marker (4) + indent + icon (4 cells) + scrollbar column
+    let title_room = width.saturating_sub(4 + indent.len() + 4 + 1);
     let title = truncate_to_width(&item.title, title_room);
     let sub_room = title_room
         .saturating_sub(unicode_width::UnicodeWidthStr::width(title) + 3)
@@ -1168,13 +1173,28 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
 
     if view.flat.is_empty() {
         let lines = vec![
+            Line::from(Span::styled(
+                if view.nav_stack.is_empty() {
+                    format!("  - {} -", view.current_path_display(source_name))
+                } else {
+                    format!(
+                        "  - {} (Backspace: up) -",
+                        view.current_path_display(source_name)
+                    )
+                },
+                Style::default().fg(C_CYAN),
+            )),
             Line::from(""),
             Line::from(Span::styled(
                 format!("  No items found in {} library.", source_name),
                 Style::default().fg(C_DIM),
             )),
             Line::from(Span::styled(
-                "  Press F5 to switch to Search.",
+                if view.nav_stack.is_empty() {
+                    "  Press F5 to switch to Search."
+                } else {
+                    "  Press Backspace to go back to parent."
+                },
                 Style::default().fg(C_DIM),
             )),
         ];
@@ -1183,7 +1203,28 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let visible_height = area.height as usize;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Breadcrumb path header
+            Constraint::Min(0),    // Item list
+        ])
+        .split(area);
+
+    let breadcrumb = view.current_path_display(source_name);
+    let header_line = if view.nav_stack.is_empty() {
+        format!("  - {} -", breadcrumb)
+    } else {
+        format!("  - {} (Backspace: up) -", breadcrumb)
+    };
+    let header_widget = Paragraph::new(Line::from(Span::styled(
+        header_line,
+        Style::default().fg(C_CYAN),
+    )));
+    f.render_widget(header_widget, chunks[0]);
+
+    let list_area = chunks[1];
+    let visible_height = list_area.height as usize;
     let (start, end) = scroll_offset(view.cursor, view.flat.len(), visible_height);
     let mut display_lines = Vec::new();
 
@@ -1193,15 +1234,15 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
             start + idx == view.cursor,
             &view.expanded,
             &app.playlist,
-            area.width as usize,
+            list_area.width as usize,
         ));
     }
 
     let widget = Paragraph::new(display_lines).alignment(ratatui::layout::Alignment::Left);
-    f.render_widget(widget, area);
+    f.render_widget(widget, list_area);
 
     if view.flat.len() > visible_height {
-        render_scrollbar(f, area, view.flat.len(), visible_height, start);
+        render_scrollbar(f, list_area, view.flat.len(), visible_height, start);
     }
 }
 

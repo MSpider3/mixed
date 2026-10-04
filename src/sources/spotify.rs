@@ -582,6 +582,17 @@ impl SpotifyClient {
                     .await
                     .map_err(|e| e.to_string())?;
 
+                if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    let retry_secs = resp
+                        .headers()
+                        .get("Retry-After")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(1);
+                    tokio::time::sleep(std::time::Duration::from_secs(retry_secs.min(5))).await;
+                    continue;
+                }
+
                 if !resp.status().is_success() {
                     if !all_items.is_empty() {
                         break;
@@ -763,7 +774,7 @@ impl SpotifyClient {
             let mut current_offset = offset;
             loop {
                 let url = format!(
-                    "https://api.spotify.com/v1/playlists/{}/items?limit=50&offset={}",
+                    "https://api.spotify.com/v1/playlists/{}/items?limit=100&offset={}",
                     pid, current_offset
                 );
                 let resp = self
@@ -773,6 +784,17 @@ impl SpotifyClient {
                     .send()
                     .await
                     .map_err(|e| e.to_string())?;
+
+                if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    let retry_secs = resp
+                        .headers()
+                        .get("Retry-After")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(1);
+                    tokio::time::sleep(std::time::Duration::from_secs(retry_secs.min(5))).await;
+                    continue;
+                }
 
                 if !resp.status().is_success() {
                     if !all_items.is_empty() {
@@ -817,10 +839,10 @@ impl SpotifyClient {
                 let len = page_items.len();
                 let total = data.total;
                 all_items.extend(page_items);
-                if len < 50 || total.is_some_and(|t| all_items.len() >= t) {
+                if len < 100 || total.is_some_and(|t| all_items.len() >= t) {
                     break;
                 }
-                current_offset += 50;
+                current_offset += 100;
             }
             return Ok(all_items);
         }

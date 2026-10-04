@@ -165,31 +165,15 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             }
         }
         KeyCode::Char('l') | KeyCode::Right => {
-            if app.active_panel == ActivePanel::Library && app.library_cursor > 0 {
-                let idx = app.library_cursor - 1;
-                if idx < app.flat_library.len() {
-                    let entry = &app.flat_library[idx].entry;
-                    if entry.is_dir() {
-                        app.expand_dir(entry.path().to_path_buf());
-                        app.refresh_needed = true;
-                        return false;
-                    }
-                }
+            if app.active_panel == ActivePanel::Library && app.toggle_container_expansion() {
+                return false;
             }
             app.next_track();
         }
         KeyCode::Char('n') => app.next_track(),
         KeyCode::Char('h') | KeyCode::Left => {
-            if app.active_panel == ActivePanel::Library && app.library_cursor > 0 {
-                let idx = app.library_cursor - 1;
-                if idx < app.flat_library.len() {
-                    let entry = &app.flat_library[idx].entry;
-                    if entry.is_dir() {
-                        app.collapse_dir(entry.path().to_path_buf());
-                        app.refresh_needed = true;
-                        return false;
-                    }
-                }
+            if app.active_panel == ActivePanel::Library && app.navigate_folder_up() {
+                return false;
             }
             app.prev_track();
         }
@@ -272,7 +256,9 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             }
         }
         KeyCode::Backspace => {
-            app.clear_playlist();
+            if !app.navigate_folder_up() && app.active_panel == ActivePanel::Queue {
+                app.clear_playlist();
+            }
         }
 
         // Search shortcut

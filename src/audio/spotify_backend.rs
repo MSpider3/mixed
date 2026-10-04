@@ -180,14 +180,8 @@ fn build_session_and_player(
                     }
                 }
                 PlayerEvent::Unavailable { .. } => {
-                    let mut cache_dir = directories::ProjectDirs::from("", "", "mixed")
-                        .map(|d| d.cache_dir().to_path_buf())
-                        .unwrap_or_else(std::env::temp_dir);
-                    cache_dir.push("spotify");
-                    let _ = std::fs::remove_file(cache_dir.join("credentials.json"));
-
                     if let Ok(mut f) = failure_for_events.lock() {
-                        *f = Some("Track is unavailable on Spotify (or session expired, please re-authenticate)".to_string());
+                        *f = Some("Track is unavailable on Spotify (or session expired, please re-authenticate via Enter in Spotify tab)".to_string());
                     }
                 }
                 _ => {}
@@ -281,6 +275,10 @@ impl SpotifyBackend {
             candidates.push(cached);
         }
 
+        if let Some(token) = stored_access_token() {
+            candidates.push(Credentials::with_access_token(token));
+        }
+
         let config_creds = crate::config::credentials::Credentials::load();
         if let (Some(user), Some(pass)) =
             (config_creds.spotify_username, config_creds.spotify_password)
@@ -288,11 +286,8 @@ impl SpotifyBackend {
             candidates.push(Credentials::with_password(user, pass));
         }
 
-        if let Some(token) = stored_access_token() {
-            candidates.push(Credentials::with_access_token(token));
-        }
         if candidates.is_empty() {
-            return Err("Spotify is not signed in".into());
+            return Err("Spotify is not signed in. Press Enter in Spotify tab to log in.".into());
         }
 
         let mut last_err = String::new();
