@@ -1685,7 +1685,7 @@ fn test_youtube_progressive_playback_and_fallback_to_full_download() {
 }
 
 #[test]
-fn test_remote_browse_enter_toggles_container_expansion() {
+fn test_remote_browse_space_toggles_container_expansion() {
     use mixed::sources::{BrowseItem, BrowseItemKind, SourceEvent, SourceTab};
 
     let mut config = AppConfig::load();
@@ -1728,9 +1728,9 @@ fn test_remote_browse_enter_toggles_container_expansion() {
     let depths: Vec<usize> = app.youtube_view.flat.iter().map(|it| it.depth).collect();
     assert_eq!(depths, vec![0, 1, 1, 0]);
 
-    // Enter on the open container closes it again
+    // Space on the open container closes it again
     app.youtube_view.cursor = 0;
-    app.remote_enqueue_selected(false, false);
+    app.toggle_container_expansion();
     assert_eq!(app.youtube_view.flat.len(), 2);
     assert!(app.youtube_view.expanded.is_empty());
 }

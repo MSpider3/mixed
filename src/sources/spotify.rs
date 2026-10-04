@@ -574,7 +574,8 @@ impl SpotifyClient {
                     .into_iter()
                     .map(|item| {
                         let track = item.track;
-                        let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
+                        let artists: Vec<String> =
+                            track.artists.into_iter().map(|a| a.name).collect();
                         let cover = track
                             .album
                             .as_ref()
@@ -592,7 +593,7 @@ impl SpotifyClient {
                         }
                     })
                     .collect();
-                
+
                 let len = page_items.len();
                 all_items.extend(page_items);
                 if len < 50 || all_items.len() >= 500 {
@@ -729,7 +730,8 @@ impl SpotifyClient {
                     .into_iter()
                     .filter_map(SpotifyPlaylistTrackItem::into_track)
                     .map(|track| {
-                        let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
+                        let artists: Vec<String> =
+                            track.artists.into_iter().map(|a| a.name).collect();
                         let cover = track
                             .album
                             .as_ref()
@@ -747,7 +749,7 @@ impl SpotifyClient {
                         }
                     })
                     .collect();
-                
+
                 let len = page_items.len();
                 all_items.extend(page_items);
                 if len < 50 || all_items.len() >= 500 {

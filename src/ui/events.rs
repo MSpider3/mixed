@@ -160,7 +160,7 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         // Playback controls
         // Playback controls
         KeyCode::Char(' ') | KeyCode::Char('p') => {
-            if !handle_container_toggle(app) {
+            if !app.toggle_container_expansion() {
                 app.toggle_pause();
             }
         }
@@ -248,7 +248,7 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             handle_enter(app);
         }
         KeyCode::Char('o') | KeyCode::Char('O') => {
-            handle_container_toggle(app);
+            app.toggle_container_expansion();
         }
         KeyCode::Delete => handle_delete(app),
         KeyCode::Char('f') => {
@@ -984,60 +984,4 @@ pub fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         MouseEventKind::ScrollDown => scroll_down(app),
         _ => {}
     }
-}
-
-fn handle_container_toggle(app: &mut App) -> bool {
-    if app.active_panel == ActivePanel::Library && app.source == crate::app::SourceTab::Local {
-        if app.library_cursor > 0 {
-            let idx = app.library_cursor - 1;
-            if idx < app.flat_library.len() {
-                let entry = &app.flat_library[idx].entry;
-                if entry.is_dir() {
-                    let path = entry.path().to_path_buf();
-                    if app.collapsed_dirs.contains(&path) {
-                        app.expand_dir(path);
-                    } else {
-                        app.collapse_dir(path);
-                    }
-                    app.refresh_needed = true;
-                    return true;
-                }
-            }
-        }
-    } else if (app.source == crate::app::SourceTab::Spotify || app.source == crate::app::SourceTab::YouTube)
-        && (app.active_panel == ActivePanel::Library || app.active_panel == ActivePanel::Search) {
-        
-        let panel = app.active_panel;
-        let item = match app.active_source_view_mut() {
-            Some(view) => {
-                if panel == ActivePanel::Search {
-                    view.search_results.get(view.search_cursor).cloned()
-                } else {
-                    view.flat.get(view.cursor).cloned()
-                }
-            }
-            None => None,
-        };
-
-        if let Some(item) = item {
-            if item.is_container {
-                let collapsed = app
-                    .active_source_view_mut()
-                    .is_some_and(|v| v.collapse(&item.id));
-                if collapsed {
-                    app.refresh_needed = true;
-                    return true;
-                }
-                if let Some(ref rt) = app.source_runtime {
-                    let _ = rt.send(crate::sources::SourceRequest::FetchChildren {
-                        source: app.source,
-                        parent_id: item.id.clone(),
-                        page: 0,
-                    });
-                }
-                return true;
-            }
-        }
-    }
-    false
 }

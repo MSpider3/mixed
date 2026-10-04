@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::ui::theme::{C_ACCENT, C_ACCENT2, C_DIM, C_FG, C_GREEN, C_CYAN};
+use crate::ui::theme::{C_ACCENT, C_ACCENT2, C_CYAN, C_DIM, C_FG, C_GREEN};
 
 /// Calculate scroll offset and slice (start, end) for a scrollable list.
 pub fn scroll_offset(cursor: usize, total: usize, visible_height: usize) -> (usize, usize) {

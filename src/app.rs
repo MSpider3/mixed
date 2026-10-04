@@ -1819,6 +1819,64 @@ impl App {
         self.rebuild_flat_library_view();
     }
 
+    pub fn toggle_container_expansion(&mut self) -> bool {
+        if self.active_panel == ActivePanel::Library && self.source == SourceTab::Local {
+            if self.library_cursor > 0 {
+                let idx = self.library_cursor - 1;
+                if idx < self.flat_library.len() {
+                    let entry = &self.flat_library[idx].entry;
+                    if entry.is_dir() {
+                        let path = entry.path().to_path_buf();
+                        if self.collapsed_dirs.contains(&path) {
+                            self.expand_dir(path);
+                        } else {
+                            self.collapse_dir(path);
+                        }
+                        self.refresh_needed = true;
+                        return true;
+                    }
+                }
+            }
+        } else if (self.source == SourceTab::Spotify || self.source == SourceTab::YouTube)
+            && (self.active_panel == ActivePanel::Library
+                || self.active_panel == ActivePanel::Search)
+        {
+            let panel = self.active_panel;
+            let item = match self.active_source_view_mut() {
+                Some(view) => {
+                    if panel == ActivePanel::Search {
+                        view.search_results.get(view.search_cursor).cloned()
+                    } else {
+                        view.flat.get(view.cursor).cloned()
+                    }
+                }
+                None => None,
+            };
+
+            if let Some(item) = item {
+                if item.is_container {
+                    let collapsed = self
+                        .active_source_view_mut()
+                        .is_some_and(|v| v.collapse(&item.id));
+                    if collapsed {
+                        self.refresh_needed = true;
+                        return true;
+                    }
+                    if let Some(ref rt) = self.source_runtime {
+                        let _ = rt.send(crate::sources::SourceRequest::FetchChildren {
+                            source: self.source,
+                            parent_id: item.id.clone(),
+                            page: 0,
+                        });
+                    }
+                    self.refresh_needed = true;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Enqueue or interact with the selected remote item (Spotify or YouTube).
     pub fn remote_enqueue_selected(&mut self, play_now: bool, play_next: bool) {
         let panel = self.active_panel;
@@ -1869,7 +1927,11 @@ impl App {
                 let mut tracks_to_enqueue = Vec::new();
                 if let Some(view) = self.active_source_view() {
                     if view.expanded.contains(&item.id) {
-                        let list = if panel == ActivePanel::Search { &view.search_results } else { &view.flat };
+                        let list = if panel == ActivePanel::Search {
+                            &view.search_results
+                        } else {
+                            &view.flat
+                        };
                         if let Some(idx) = list.iter().position(|it| it.id == item.id) {
                             let depth = list[idx].depth;
                             for child in list.iter().skip(idx + 1) {
@@ -1880,7 +1942,9 @@ impl App {
                                     let meta = crate::data::metadata::TrackMetadata {
                                         title: Some(child.title.clone()),
                                         artist: child.subtitle.clone(),
-                                        duration: child.duration_secs.map(std::time::Duration::from_secs),
+                                        duration: child
+                                            .duration_secs
+                                            .map(std::time::Duration::from_secs),
                                         cover_url: child.artwork_url.clone(),
                                         ..Default::default()
                                     };
@@ -1890,12 +1954,14 @@ impl App {
                         }
                     }
                 }
-                
+
                 if tracks_to_enqueue.is_empty() {
-                    self.set_status("Open the folder first (Space) to load its songs for enqueueing.");
+                    self.set_status(
+                        "Open the folder first (Space) to load its songs for enqueueing.",
+                    );
                 } else {
                     self.toggle_enqueue_tracks(&tracks_to_enqueue, play_now);
-                    self.set_status(&format!("Enqueued {} tracks", tracks_to_enqueue.len()));
+                    self.set_status(format!("Enqueued {} tracks", tracks_to_enqueue.len()));
                 }
                 self.refresh_needed = true;
             } else if let Some(tr) = item.track_ref {
