@@ -298,6 +298,7 @@ impl SpotifyClient {
             "playlist-read-private",
             "playlist-read-collaborative",
             "user-library-read",
+            "user-read-private",
         ];
 
         let oauth_client = librespot_oauth::OAuthClientBuilder::new(
