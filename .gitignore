@@ -17,3 +17,10 @@ personal_tests/
 docs/mixed Full Audit Bugs.md
 docs/read-my-entire-mixed-robust-dongarra.md
 docs/mixed — Full Debug & Improvement Report.html
+
+# Local configuration, tokens, and credentials
+credentials.json
+config.json
+*.env
+.env*
+
