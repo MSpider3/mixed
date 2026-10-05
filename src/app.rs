@@ -513,6 +513,13 @@ impl App {
                     self.refresh_needed = true;
                 }
             }
+            PlayerEvent::SpotifySignInLost => {
+                self.spotify_view.connected = false;
+                self.spotify_view.error = Some(
+                    "Playback sign-in is no longer valid. Press Enter to sign in again.".into(),
+                );
+                self.refresh_needed = true;
+            }
             PlayerEvent::Finished { generation } => {
                 if generation == self.load_generation {
                     self.consecutive_failures = 0;
@@ -647,6 +654,14 @@ impl App {
                     view.connected = connected;
                     view.user_name = user_name;
                     view.error = error;
+                    view.login_status = None;
+                    self.refresh_needed = true;
+                }
+            }
+            SourceEvent::LoginProgress { source, message } => {
+                if let Some(view) = self.source_view_mut(source) {
+                    view.error = None;
+                    view.login_status = Some(message);
                     self.refresh_needed = true;
                 }
             }
@@ -655,6 +670,7 @@ impl App {
                     view.roots = items.clone();
                     view.flat = items;
                     view.expanded.clear();
+                    view.nav_stack.clear();
                     view.cursor = 0;
                     view.loading = false;
                     self.refresh_needed = true;
@@ -2002,18 +2018,21 @@ impl App {
                         let item = view.search_results.get(view.search_cursor).cloned();
                         (item, false)
                     }
+                } else if view.awaiting_login_input {
+                    let input = view.login_input.trim().to_string();
+                    view.awaiting_login_input = false;
+                    view.loading = true;
+                    // Signing in again (Spotify, with another Client ID) replaces the session
+                    view.connected = false;
+                    if let Some(ref rt) = self.source_runtime {
+                        let _ = rt.send(crate::sources::SourceRequest::Login {
+                            source,
+                            payload: input,
+                        });
+                    }
+                    (None, true)
                 } else if !view.connected {
-                    if view.awaiting_login_input {
-                        let input = view.login_input.trim().to_string();
-                        view.awaiting_login_input = false;
-                        view.loading = true;
-                        if let Some(ref rt) = self.source_runtime {
-                            let _ = rt.send(crate::sources::SourceRequest::Login {
-                                source,
-                                payload: input,
-                            });
-                        }
-                    } else if source == SourceTab::Spotify {
+                    if source == SourceTab::Spotify {
                         // Immediately launch browser OAuth with default official client ID
                         view.loading = true;
                         if let Some(ref rt) = self.source_runtime {

@@ -261,6 +261,16 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             }
         }
 
+        // Sign in to Spotify with a Client ID of your own
+        KeyCode::Char('c')
+            if app.source == crate::app::SourceTab::Spotify
+                && app.active_panel == ActivePanel::Library =>
+        {
+            app.spotify_view.awaiting_login_input = true;
+            app.spotify_view.login_input.clear();
+            app.refresh_needed = true;
+        }
+
         // Search shortcut
         KeyCode::Char('/') => {
             app.active_panel = ActivePanel::Search;

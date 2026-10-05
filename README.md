@@ -81,7 +81,7 @@ Quickly explore artist discography, lyrics, or background information in your de
 ### 🌐 Multi-Source Streaming (Spotify, YouTube Music & Local)
 Seamlessly search, browse, enqueue, and play music across multiple sources in one unified player:
 - **Local Library (`Ctrl+1` / `Alt+1`)**: Zero-dependency offline audio playback for FLAC, MP3, WAV, and OGG files with embedded metadata and synchronized lyrics.
-- **Spotify (`Ctrl+2` / `Alt+2`)**: Search and library navigation (Liked Songs, Playlists, Albums) with raw PCM playback powered by `librespot` (requires Spotify Premium and your own Client ID).
+- **Spotify (`Ctrl+2` / `Alt+2`)**: Search and library navigation (Liked Songs, Playlists, Albums) with raw PCM playback powered by `librespot` (requires Spotify Premium).
 - **YouTube Music (`Ctrl+3` / `Alt+3`)**: Search and browse YouTube Music tracks with background audio caching and 50% sequential prefetch via `yt-dlp`. Playback starts while the track is still downloading. Search and playback work without an account; a browser cookie adds your own library.
 - **Unified Queue (`Ctrl+4` / `Alt+4`)**: Mix tracks from local files, Spotify, and YouTube in a single queue with automatic cross-source advancing. The queue, including remote tracks, is restored on the next launch.
 
@@ -94,13 +94,13 @@ Remote libraries and search results are shown as a tree like the local library: 
 > **Runtime Requirements:**
 > - **Local Playback**: Fully standalone and self-contained binary with all decoders statically compiled in. Zero external runtime dependencies.
 > - **YouTube Music Streaming**: Requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) installed and available in your system `$PATH` (or set `yt_dlp_path` in `config.json`).
-> - **Spotify Streaming**: Requires **Spotify Premium** and a personal Spotify Developer Client ID (PKCE authorization code flow, no secret required). You paste the Client ID once inside the app; it is saved to `credentials.json`.
+> - **Spotify Streaming**: Requires **Spotify Premium**. You sign in from the app with two approvals in your browser (PKCE authorization code flow, no secret and no developer account required). A Spotify Developer Client ID of your own is optional.
 > - **Shortcut Fallback**: `Ctrl+1..4` and `Shift+Enter` are only reported by terminals that support the kitty keyboard protocol (Kitty, Foot, WezTerm, Ghostty, recent Alacritty). Elsewhere, use `Alt+1..4` to switch sources.
 
 ### Authentication & API Setup
 
 For detailed instructions on configuring streaming sources, see the dedicated guides:
-- **[Spotify Setup & Authentication](docs/spotify.md)** — Create a Client ID, sign in from the app, and see what is stored and how playback connects.
+- **[Spotify Setup & Authentication](docs/spotify.md)** — Sign in from the app, optionally with your own Client ID, and see what is stored and how playback connects.
 - **[YouTube Music Setup](docs/youtube.md)** — Install `yt-dlp`, optionally sign in with a browser cookie to see your library, and learn how caching and play-while-downloading work.
 
 ### Files & Configuration
@@ -221,6 +221,7 @@ mixed --play /path/to/song.flac
 | `r` | Cycle repeat mode (off → track → queue) | Playback |
 | `Enter` | Enqueue or dequeue selected item / Play selected queue item | Queue / Library / Search |
 | `Enter` | Open or close the selected album, playlist or folder; sign in when not connected | Spotify / YouTube |
+| `c` | Sign in with your own Spotify Client ID | Spotify Library |
 | `Alt + Enter` | Enqueue selected item and play immediately | Library / Search |
 | `Shift + Enter` | Enqueue selected track or folder to play next | Library / Search |
 | `o` / `←` / `→` | Toggle / Collapse/Expand directory tree | Local Library |

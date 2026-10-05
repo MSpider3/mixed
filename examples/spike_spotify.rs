@@ -2,7 +2,6 @@ use librespot_core::authentication::Credentials;
 use librespot_core::cache::Cache;
 use librespot_core::config::SessionConfig;
 use librespot_core::session::Session;
-use librespot_oauth::OAuthClientBuilder;
 use librespot_playback::audio_backend::{Sink, SinkResult};
 use librespot_playback::config::PlayerConfig;
 use librespot_playback::convert::Converter;
@@ -49,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         writer: writer.clone(),
     };
 
-    println!("[1/4] Testing custom sink packet translation...");
+    println!("[1/3] Testing custom sink packet translation...");
     let test_samples = vec![0.1f64, -0.2f64, 0.5f64, -0.5f64];
     let packet = AudioPacket::Samples(test_samples.clone());
     let mut dummy_converter = Converter::new(Default::default());
@@ -61,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!((s1 - 0.1f32).abs() < 1e-4);
 
     // 2. Verify Session and Player instantiation signatures
-    println!("[2/4] Testing Session, Cache, and Player constructor wiring...");
+    println!("[2/3] Testing Session, Cache, and Player constructor wiring...");
     let temp_cache_dir = std::env::temp_dir().join("mixed_spike_spotify_cache");
     let _ = std::fs::create_dir_all(&temp_cache_dir);
     let cache = Cache::new(Some(&temp_cache_dir), None, Some(&temp_cache_dir), None).ok();
@@ -90,36 +89,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .unwrap();
     println!("Player initialized in std::thread successfully.");
 
-    // 3. Verify OAuth PKCE Client Builder configuration
-    println!("[3/4] Testing librespot-oauth PKCE builder configuration...");
-    let client_id = "test_client_id_placeholder";
-    let redirect_uri = "http://127.0.0.1:8898/login";
-    let scopes = vec![
-        "user-read-playback-state",
-        "user-modify-playback-state",
-        "user-read-currently-playing",
-        "streaming",
-        "playlist-read-private",
-        "playlist-read-collaborative",
-        "user-library-read",
-    ];
-
-    let oauth_builder = OAuthClientBuilder::new(client_id, redirect_uri, scopes);
-    let oauth_client = oauth_builder.build()?;
-    println!(
-        "OAuth client configured with redirect URI: {}",
-        redirect_uri
-    );
-    let _ = oauth_client;
-
-    // 4. Verify Credentials structure
+    // 3. Verify Credentials structure
     let creds = Credentials::with_access_token("mock_access_token");
     let res = session.connect(creds, true).await;
     match res {
         Ok(_) => println!("Connected"),
         Err(e) => println!("Connect error: {:?}", e),
     }
-    println!("[4/4] Credentials::with_access_token validated.");
+    println!("[3/3] Credentials::with_access_token validated.");
 
     println!("=== Spotify spike validation complete: ALL TESTS PASSED ===");
     Ok(())

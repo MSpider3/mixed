@@ -111,60 +111,57 @@ impl Default for SpotifyBackend {
     }
 }
 
-/// Read the Web API access token persisted by the network runtime.
+/// Upper bound for the audio files librespot keeps on disk.
 #[cfg(feature = "spotify")]
-fn stored_access_token() -> Option<String> {
-    let token_cache = crate::config::credentials::Credentials::load().spotify_token_cache?;
-    match serde_json::from_str::<serde_json::Value>(&token_cache) {
-        Ok(val) => val
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
-        Err(_) => Some(token_cache),
+const AUDIO_CACHE_LIMIT: u64 = 1024 * 1024 * 1024;
+
+#[cfg(feature = "spotify")]
+fn cache_dir() -> std::path::PathBuf {
+    let mut dir = directories::ProjectDirs::from("", "", "mixed")
+        .map(|d| d.cache_dir().to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    dir.push("spotify");
+    dir
+}
+
+/// librespot's cache: its reusable login in `cache_dir()` and, with `audio`,
+/// downloaded audio in a subfolder of its own (the size limit prunes that folder).
+#[cfg(feature = "spotify")]
+fn open_cache(audio: bool) -> Option<Cache> {
+    let dir = cache_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let audio_dir = audio.then(|| dir.join("files"));
+    Cache::new(Some(dir), None, audio_dir, Some(AUDIO_CACHE_LIMIT)).ok()
+}
+
+#[cfg(feature = "spotify")]
+fn session_config() -> SessionConfig {
+    SessionConfig {
+        client_id: crate::sources::spotify::SPOTIFY_STREAMING_CLIENT_ID.to_string(),
+        ..Default::default()
     }
 }
 
-/// Refresh the stored access token via OAuth and persist the new token.
+/// True if a playback sign-in is stored (see `store_credentials`).
 #[cfg(feature = "spotify")]
-async fn refresh_access_token_now() -> Result<String, String> {
-    let creds = crate::config::credentials::Credentials::load();
-    let client_id = creds
-        .spotify_client_id
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| crate::sources::spotify::DEFAULT_SPOTIFY_CLIENT_ID.to_string());
-    let token_cache = creds
-        .spotify_token_cache
-        .ok_or_else(|| "No token cache found in credentials.json".to_string())?;
+pub fn has_stored_credentials() -> bool {
+    open_cache(false).and_then(|c| c.credentials()).is_some()
+}
 
-    let refresh_tok = match serde_json::from_str::<serde_json::Value>(&token_cache) {
-        Ok(val) => val
-            .get("refresh_token")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
-        Err(_) => None,
+/// Sign librespot in with an access token of the streaming client ID. librespot
+/// stores the reusable credentials it gets back, and playback connects with those.
+#[cfg(feature = "spotify")]
+pub async fn store_credentials(access_token: &str) -> Result<(), String> {
+    let cache = open_cache(false).ok_or("Cannot open the Spotify cache directory")?;
+    let session = Session::new(session_config(), Some(cache));
+    let connect = session.connect(Credentials::with_access_token(access_token), true);
+    let result = tokio::time::timeout(CONNECT_TIMEOUT, connect).await;
+    session.shutdown();
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("Spotify playback sign-in failed: {}", e)),
+        Err(_) => Err("Spotify playback sign-in timed out".into()),
     }
-    .ok_or_else(|| "No refresh_token in credentials token cache".to_string())?;
-
-    let redirect_uri = crate::sources::spotify::redirect_uri_for_client(&client_id);
-    let oauth_client = librespot_oauth::OAuthClientBuilder::new(&client_id, redirect_uri, vec![])
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let new_token = oauth_client
-        .refresh_token_async(&refresh_tok)
-        .await
-        .map_err(|e| format!("Token refresh failed: {}", e))?;
-
-    let mut updated_creds = crate::config::credentials::Credentials::load();
-    updated_creds.spotify_client_id = Some(client_id);
-    let cache = serde_json::json!({
-        "access_token": new_token.access_token.clone(),
-        "refresh_token": new_token.refresh_token.clone(),
-    });
-    updated_creds.spotify_token_cache = Some(cache.to_string());
-    let _ = updated_creds.save();
-
-    Ok(new_token.access_token)
 }
 
 /// Build a librespot session and player bound to `rt`, plus the task that maps
@@ -181,23 +178,7 @@ fn build_session_and_player(
     // Session::new captures the current Tokio handle, so it must run inside the runtime.
     let _guard = rt.enter();
 
-    let mut cache_dir = directories::ProjectDirs::from("", "", "mixed")
-        .map(|d| d.cache_dir().to_path_buf())
-        .unwrap_or_else(std::env::temp_dir);
-    cache_dir.push("spotify");
-    let _ = std::fs::create_dir_all(&cache_dir);
-    let cache = Cache::new(Some(&cache_dir), None, Some(&cache_dir), None).ok();
-
-    let client_id = crate::config::credentials::Credentials::load()
-        .spotify_client_id
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| crate::sources::spotify::DEFAULT_SPOTIFY_CLIENT_ID.to_string());
-
-    let session_config = SessionConfig {
-        client_id,
-        ..Default::default()
-    };
-    let session = Session::new(session_config, cache);
+    let session = Session::new(session_config(), open_cache(true));
 
     let writer_clone = writer_holder.clone();
     let stopped_clone = stopped.clone();
@@ -332,7 +313,7 @@ impl SpotifyBackend {
     }
 
     /// Connect the librespot session if it is not connected yet. Blocks the calling
-    /// (player) thread for at most `CONNECT_TIMEOUT` per credential tried.
+    /// (player) thread for at most `CONNECT_TIMEOUT`.
     #[cfg(feature = "spotify")]
     fn ensure_connected(&mut self) -> Result<(), String> {
         let Some(rt) = self.rt.as_ref() else {
@@ -360,71 +341,51 @@ impl SpotifyBackend {
             return Err("Spotify session not initialized".into());
         };
 
-        // Prefer librespot's own reusable credentials (they do not expire hourly),
-        // then fall back to the Web API access token from credentials.json.
-        let mut candidates = Vec::new();
-        if let Some(cached) = session.cache().and_then(|c| c.credentials()) {
-            candidates.push(("librespot session cache", cached));
-        }
+        let Some(creds) = session.cache().and_then(|c| c.credentials()) else {
+            log::warn!("No stored Spotify playback sign-in");
+            return Err(
+                "Spotify playback is not signed in. Sign in from the Spotify Library tab.".into(),
+            );
+        };
 
-        if let Some(token) = stored_access_token() {
-            candidates.push((
-                "access token from credentials",
-                Credentials::with_access_token(token),
-            ));
-        }
-
-        if candidates.is_empty() {
-            log::warn!("No Spotify credentials found to connect streaming session");
-            return Err("Spotify is not signed in. Press Enter in Spotify tab to log in.".into());
-        }
-
-        let mut last_err = String::new();
-        for (desc, creds) in candidates {
-            log::debug!("Attempting Spotify streaming connect using {}", desc);
-            let session = session.clone();
-            let res = rt.block_on(async move {
-                tokio::time::timeout(CONNECT_TIMEOUT, session.connect(creds, true)).await
-            });
-            match res {
-                Ok(Ok(())) => {
-                    log::info!(
-                        "Spotify streaming session connected successfully via {}",
-                        desc
-                    );
-                    self.connected = true;
-                    return Ok(());
-                }
-                Ok(Err(e)) => {
-                    log::warn!("Spotify connect with {} failed: {}", desc, e);
-                    last_err = e.to_string();
-                }
-                Err(_) => {
-                    log::warn!("Spotify connect with {} timed out", desc);
-                    last_err = "connection timed out".to_string();
-                }
-            }
-        }
-
-        // Candidates may have expired; attempt on-demand OAuth token refresh and retry connect
-        log::debug!("Attempting on-demand token refresh for Spotify streaming session");
-        if let Ok(new_token) = rt.block_on(refresh_access_token_now()) {
-            let session = session.clone();
-            let creds = Credentials::with_access_token(new_token);
-            let res = rt.block_on(async move {
-                tokio::time::timeout(CONNECT_TIMEOUT, session.connect(creds, true)).await
-            });
-            if let Ok(Ok(())) = res {
-                log::info!("Spotify streaming session connected after refreshing token");
+        let res = rt.block_on(async move {
+            tokio::time::timeout(CONNECT_TIMEOUT, session.connect(creds, true)).await
+        });
+        let err = match res {
+            Ok(Ok(())) => {
+                log::info!("Spotify streaming session connected");
                 self.connected = true;
                 return Ok(());
-            } else if let Ok(Err(e)) = res {
-                last_err = e.to_string();
             }
-        }
+            Ok(Err(e)) if e.kind == librespot_core::error::ErrorKind::PermissionDenied => {
+                // Spotify rejected the stored sign-in: forget it, so that the user
+                // is asked to sign in again instead of failing the same way.
+                let _ = std::fs::remove_file(cache_dir().join("credentials.json"));
+                format!(
+                    "Spotify playback sign-in was rejected ({}). Sign in again from the Spotify Library tab.",
+                    e
+                )
+            }
+            Ok(Err(e)) => format!("Spotify connection failed: {}", e),
+            Err(_) => "Spotify connection failed: connection timed out".to_string(),
+        };
+        log::error!("{}", err);
+        // A session can only be connected once: the next attempt needs a new one.
+        self.session = None;
+        self.player = None;
+        Err(err)
+    }
 
-        log::error!("Spotify streaming session connection failed: {}", last_err);
-        Err(format!("Spotify connection failed: {}", last_err))
+    /// True if playback cannot connect until the user signs in again.
+    pub fn needs_sign_in(&self) -> bool {
+        #[cfg(feature = "spotify")]
+        {
+            !has_stored_credentials()
+        }
+        #[cfg(not(feature = "spotify"))]
+        {
+            false
+        }
     }
 
     /// Take the pending playback failure reported by librespot, if any.

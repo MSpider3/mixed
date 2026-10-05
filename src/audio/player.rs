@@ -34,11 +34,25 @@ impl From<&Path> for PlayInput {
 /// Events produced by the audio playback thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayerEvent {
-    Loaded { generation: u64 },
-    Buffering { generation: u64 },
-    Failed { generation: u64, error: String },
-    Finished { generation: u64 },
-    Position { generation: u64, position_ms: u64 },
+    Loaded {
+        generation: u64,
+    },
+    Buffering {
+        generation: u64,
+    },
+    Failed {
+        generation: u64,
+        error: String,
+    },
+    Finished {
+        generation: u64,
+    },
+    Position {
+        generation: u64,
+        position_ms: u64,
+    },
+    /// Spotify rejected the stored playback sign-in; the user has to sign in again.
+    SpotifySignInLost,
 }
 
 /// Commands sent to the background player thread.
@@ -267,6 +281,9 @@ impl Player {
                                         }
                                     }
                                     Err(e) => {
+                                        if spotify_backend.needs_sign_in() {
+                                            let _ = event_tx.send(PlayerEvent::SpotifySignInLost);
+                                        }
                                         is_playing_clone.store(false, Ordering::Release);
                                         is_finished_clone.store(true, Ordering::Release);
                                         was_finished = true;

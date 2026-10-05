@@ -67,7 +67,8 @@ struct SpotifySearchResponse {
 #[cfg(feature = "spotify")]
 #[derive(Debug, Deserialize)]
 struct SpotifyPaging<T> {
-    items: Vec<T>,
+    /// Spotify fills in `null` for entries it will not show (e.g. in playlist searches).
+    items: Vec<Option<T>>,
     #[allow(dead_code)]
     total: Option<usize>,
 }
@@ -154,12 +155,33 @@ const SEARCH_PAGE_SIZE_STR: &str = "10";
 #[cfg(feature = "spotify")]
 const TOKEN_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(45 * 60);
 
-/// Spotify desktop player client ID (spotify-player / spotatui standard, supports streaming + Web API).
-pub const DEFAULT_SPOTIFY_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
+/// A rate limit longer than this is reported instead of waited out.
+#[cfg(feature = "spotify")]
+const MAX_RATE_LIMIT_WAIT_SECS: u64 = 30;
+#[cfg(feature = "spotify")]
+const MAX_RATE_LIMIT_RETRIES: u32 = 5;
 
-/// Redirect URI for the default player client ID.
+/// Default client ID for the Web API (search and library): the one ncspot,
+/// spotify-player and spotatui share. Spotify rate-limits the streaming client ID
+/// below on the Web API, so the two jobs need separate sign-ins.
+pub const DEFAULT_SPOTIFY_CLIENT_ID: &str = "d420a117a32841c2b3474932e49fb54b";
+
+/// Client ID of Spotify's desktop player, which librespot signs in with for audio.
+pub const SPOTIFY_STREAMING_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
+
+/// Redirect URI registered for both built-in client IDs.
 #[cfg(feature = "spotify")]
 pub const DEFAULT_SPOTIFY_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
+
+#[cfg(feature = "spotify")]
+const WEB_API_SCOPES: &[&str] = &[
+    "playlist-read-private",
+    "playlist-read-collaborative",
+    "user-library-read",
+    "user-read-private",
+    "user-read-recently-played",
+    "user-top-read",
+];
 
 /// Return the appropriate redirect URI for a given Spotify client ID.
 #[cfg(feature = "spotify")]
@@ -168,6 +190,18 @@ pub fn redirect_uri_for_client(client_id: &str) -> &'static str {
         DEFAULT_SPOTIFY_REDIRECT_URI
     } else {
         "http://127.0.0.1:8898/login"
+    }
+}
+
+/// Describe a failed Web API response, with Spotify's own message when it sent one.
+#[cfg(feature = "spotify")]
+fn describe_api_error(status: reqwest::StatusCode, body: &str) -> String {
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.pointer("/error/message")?.as_str().map(str::to_string));
+    match message {
+        Some(message) => format!("Spotify API error: HTTP {} ({})", status, message),
+        None => format!("Spotify API error: HTTP {}", status),
     }
 }
 
@@ -208,6 +242,11 @@ impl SpotifyClient {
         self.access_token.is_some() && self.is_premium
     }
 
+    /// True once playback has been signed in as well (the second step of `login`).
+    pub fn can_stream(&self) -> bool {
+        crate::audio::spotify_backend::has_stored_credentials()
+    }
+
     pub fn user_name(&self) -> Option<&str> {
         self.user_name.as_deref()
     }
@@ -216,41 +255,100 @@ impl SpotifyClient {
         self.last_error.as_deref()
     }
 
-    pub fn client_id(&self) -> Option<&str> {
-        self.client_id.as_deref()
-    }
+    /// GET a Web API URL with the current access token. Short rate limits are waited
+    /// out; any other failure is returned with Spotify's explanation.
+    async fn get(&self, url: &str) -> Result<reqwest::Response, String> {
+        let Some(token) = self.access_token.as_deref() else {
+            return Err("Spotify access token missing".into());
+        };
 
-    pub fn access_token(&self) -> Option<&str> {
-        self.access_token.as_deref()
-    }
-
-    pub fn refresh_token(&self) -> Option<&str> {
-        self.refresh_token.as_deref()
-    }
-
-    pub async fn verify_or_refresh_session(&mut self) -> Result<(), String> {
-        if let Some(ref token) = self.access_token {
+        let mut retries = 0;
+        loop {
             let resp = self
                 .http
-                .get("https://api.spotify.com/v1/me")
+                .get(url)
                 .bearer_auth(token)
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
-
-            if resp.status().is_success() {
-                if let Ok(me) = resp.json::<SpotifyUserMe>().await {
-                    let is_prem = me.product.as_deref() == Some("premium");
-                    self.is_premium = is_prem;
-                    self.user_name = me.display_name.or(Some(me.id));
-                    if !is_prem {
-                        return Err("Spotify Premium is required.".into());
-                    }
-                    return Ok(());
-                }
+            let status = resp.status();
+            if status.is_success() {
+                return Ok(resp);
             }
-        }
 
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_secs = resp
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(1)
+                    .max(1);
+                retries += 1;
+                // Asking again before the window ends only prolongs the limit.
+                if retries <= MAX_RATE_LIMIT_RETRIES && retry_secs <= MAX_RATE_LIMIT_WAIT_SECS {
+                    tokio::time::sleep(std::time::Duration::from_secs(retry_secs)).await;
+                    continue;
+                }
+                log::warn!(
+                    "Spotify rate limit on {}: retry after {} s",
+                    url,
+                    retry_secs
+                );
+                return Err(format!(
+                    "Spotify is rate limiting requests. Try again in {} s.",
+                    retry_secs
+                ));
+            }
+
+            let body = resp.text().await.unwrap_or_default();
+            log::warn!("Spotify API returned {} for {}: {}", status, url, body);
+            return Err(describe_api_error(status, &body));
+        }
+    }
+
+    /// Fetch the user's name and subscription with the current access token.
+    async fn load_profile(&mut self) -> Result<(), String> {
+        let me = self
+            .get("https://api.spotify.com/v1/me")
+            .await?
+            .json::<SpotifyUserMe>()
+            .await
+            .map_err(|e| format!("Failed to parse user profile: {}", e))?;
+        self.is_premium = me.product.as_deref() == Some("premium");
+        self.user_name = me.display_name.or(Some(me.id));
+        if !self.is_premium {
+            return Err("Spotify Premium is required.".into());
+        }
+        Ok(())
+    }
+
+    /// Take over newly issued tokens and persist them: an old refresh token may
+    /// no longer be valid once a new one exists.
+    fn adopt_token(&mut self, token: super::spotify_oauth::Token) {
+        self.access_token = Some(token.access_token);
+        // A refresh without a new refresh token leaves the current one valid.
+        if token.refresh_token.is_some() {
+            self.refresh_token = token.refresh_token;
+        }
+        self.token_issued_at = Some(std::time::Instant::now());
+
+        let mut creds = crate::config::credentials::Credentials::load();
+        creds.spotify_client_id = self.client_id.clone();
+        let cache = serde_json::json!({
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token,
+        });
+        creds.spotify_token_cache = Some(cache.to_string());
+        if let Err(e) = creds.save() {
+            log::warn!("Could not save Spotify credentials: {}", e);
+        }
+    }
+
+    pub async fn verify_or_refresh_session(&mut self) -> Result<(), String> {
+        if self.access_token.is_some() && self.load_profile().await.is_ok() {
+            return Ok(());
+        }
         self.refresh_session().await
     }
 
@@ -262,56 +360,9 @@ impl SpotifyClient {
             return Err("No valid Spotify session".into());
         };
 
-        let redirect_uri = redirect_uri_for_client(&client_id);
-        let oauth_client =
-            librespot_oauth::OAuthClientBuilder::new(&client_id, redirect_uri, vec![])
-                .build()
-                .map_err(|e| e.to_string())?;
-
-        let new_token = oauth_client
-            .refresh_token_async(&refresh_tok)
-            .await
-            .map_err(|e| format!("Spotify token refresh failed: {}", e))?;
-
-        self.access_token = Some(new_token.access_token.clone());
-        self.refresh_token = Some(new_token.refresh_token);
-        self.token_issued_at = Some(std::time::Instant::now());
-
-        // Persist immediately: the old refresh token may no longer be valid.
-        let mut creds = crate::config::credentials::Credentials::load();
-        creds.spotify_client_id = Some(client_id);
-        let cache = serde_json::json!({
-            "access_token": self.access_token.clone(),
-            "refresh_token": self.refresh_token.clone(),
-        });
-        creds.spotify_token_cache = Some(cache.to_string());
-        let _ = creds.save();
-
-        let resp = self
-            .http
-            .get("https://api.spotify.com/v1/me")
-            .bearer_auth(&new_token.access_token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !resp.status().is_success() {
-            return Err(format!(
-                "Failed to fetch user profile: HTTP {}",
-                resp.status()
-            ));
-        }
-        let me = resp
-            .json::<SpotifyUserMe>()
-            .await
-            .map_err(|e| format!("Failed to parse user profile: {}", e))?;
-        let is_prem = me.product.as_deref() == Some("premium");
-        self.is_premium = is_prem;
-        self.user_name = me.display_name.or(Some(me.id));
-        if !is_prem {
-            return Err("Spotify Premium is required.".into());
-        }
-        Ok(())
+        let token = super::spotify_oauth::refresh(&client_id, &refresh_tok).await?;
+        self.adopt_token(token);
+        self.load_profile().await
     }
 
     /// Refresh the access token when it is old (or of unknown age) so long
@@ -325,128 +376,80 @@ impl SpotifyClient {
             .is_none_or(|at| at.elapsed() >= TOKEN_MAX_AGE);
         if stale {
             // On failure keep the current token; the request reports its own error.
-            let _ = self.refresh_session().await;
+            if let Err(e) = self.refresh_session().await {
+                log::warn!("{}", e);
+            }
         }
     }
 
-    pub async fn login(&mut self, input_client_id: &str) -> Result<String, String> {
-        let client_id = if input_client_id.trim().is_empty() || input_client_id.trim() == "default"
-        {
-            DEFAULT_SPOTIFY_CLIENT_ID
-        } else {
-            input_client_id.trim()
+    /// Sign in through the browser. Two consents are needed, one for the Web API and
+    /// one for playback, since they use different client IDs. A consent that is
+    /// already in place is skipped, so a failed sign-in resumes where it stopped.
+    /// `progress` is told what the user has to do next.
+    pub async fn login(
+        &mut self,
+        input_client_id: &str,
+        progress: impl Fn(&str),
+    ) -> Result<String, String> {
+        let client_id = match input_client_id.trim() {
+            "" => self
+                .client_id
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SPOTIFY_CLIENT_ID.to_string()),
+            "default" => DEFAULT_SPOTIFY_CLIENT_ID.to_string(),
+            id => id.to_string(),
         };
-        let redirect_uri = redirect_uri_for_client(client_id);
-
-        let scopes = vec![
-            "user-read-playback-state",
-            "user-modify-playback-state",
-            "user-read-currently-playing",
-            "streaming",
-            "playlist-read-private",
-            "playlist-read-collaborative",
-            "user-library-read",
-            "user-read-private",
-            "user-read-recently-played",
-            "user-top-read",
-        ];
-
-        let oauth_client =
-            librespot_oauth::OAuthClientBuilder::new(client_id, redirect_uri, scopes)
-                .open_in_browser()
-                .build()
-                .map_err(|e| format!("Failed to create OAuth client: {}", e))?;
-
-        let token = oauth_client
-            .get_access_token_async()
-            .await
-            .map_err(|e| format!("OAuth login failed: {}", e))?;
-
-        self.client_id = Some(client_id.to_string());
-        self.access_token = Some(token.access_token.clone());
-        self.refresh_token = Some(token.refresh_token.clone());
-        self.token_issued_at = Some(std::time::Instant::now());
-
-        // Check user profile and Premium status
-        let resp = self
-            .http
-            .get("https://api.spotify.com/v1/me")
-            .bearer_auth(&token.access_token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !resp.status().is_success() {
-            return Err(format!(
-                "Failed to fetch user profile: HTTP {}",
-                resp.status()
-            ));
+        // Spotify would only say so in the browser, leaving the sign-in to time out.
+        if client_id.len() != 32 || !client_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err("A Spotify Client ID is 32 letters and digits.".into());
         }
 
-        let me = resp
-            .json::<SpotifyUserMe>()
-            .await
-            .map_err(|e| format!("Failed to parse user profile: {}", e))?;
-
-        let is_prem = me.product.as_deref() == Some("premium");
-        self.is_premium = is_prem;
-        let display_name = me.display_name.unwrap_or(me.id);
-        self.user_name = Some(display_name.clone());
-
-        if !is_prem {
-            return Err("Spotify Premium is required.".into());
+        if self.client_id.as_deref() != Some(client_id.as_str())
+            || self.verify_or_refresh_session().await.is_err()
+        {
+            progress("Step 1 of 2: approve library access in your browser...");
+            let token = super::spotify_oauth::authorize(
+                &client_id,
+                redirect_uri_for_client(&client_id),
+                WEB_API_SCOPES,
+            )
+            .await?;
+            self.client_id = Some(client_id);
+            self.adopt_token(token);
+            self.load_profile().await?;
         }
 
-        Ok(format!("Connected to Spotify as {}", display_name))
+        if !self.can_stream() {
+            progress("Step 2 of 2: approve playback in your browser...");
+            let token = super::spotify_oauth::authorize(
+                SPOTIFY_STREAMING_CLIENT_ID,
+                DEFAULT_SPOTIFY_REDIRECT_URI,
+                &["streaming"],
+            )
+            .await?;
+            crate::audio::spotify_backend::store_credentials(&token.access_token).await?;
+        }
+
+        self.last_error = None;
+        Ok(format!(
+            "Connected to Spotify as {}",
+            self.user_name.as_deref().unwrap_or("unknown")
+        ))
     }
 
     pub async fn search(&self, query: &str, page: usize) -> Result<Vec<BrowseItem>, String> {
-        let Some(ref token) = self.access_token else {
-            return Err("Spotify access token missing".into());
-        };
-
         let offset_str = (page * SEARCH_PAGE_SIZE).to_string();
-        let mut resp = self
-            .http
-            .get("https://api.spotify.com/v1/search")
-            .query(&[
+        let url = reqwest::Url::parse_with_params(
+            "https://api.spotify.com/v1/search",
+            &[
                 ("q", query),
                 ("type", "track,album,playlist"),
                 ("limit", SEARCH_PAGE_SIZE_STR),
                 ("offset", &offset_str),
-            ])
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if resp.status().as_u16() == 429 {
-            let retry_secs = resp
-                .headers()
-                .get("Retry-After")
-                .and_then(|h| h.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(2)
-                .min(5);
-            tokio::time::sleep(std::time::Duration::from_secs(retry_secs)).await;
-            resp = self
-                .http
-                .get("https://api.spotify.com/v1/search")
-                .query(&[
-                    ("q", query),
-                    ("type", "track,album,playlist"),
-                    ("limit", SEARCH_PAGE_SIZE_STR),
-                    ("offset", &offset_str),
-                ])
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-
-        if !resp.status().is_success() {
-            return Err(format!("Search failed: HTTP {}", resp.status()));
-        }
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        let resp = self.get(url.as_str()).await?;
 
         let search_data = resp
             .json::<SpotifySearchResponse>()
@@ -457,7 +460,7 @@ impl SpotifyClient {
 
         // 1. Tracks
         if let Some(tracks) = search_data.tracks {
-            for track in tracks.items {
+            for track in tracks.items.into_iter().flatten() {
                 let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
                 let cover = track
                     .album
@@ -479,7 +482,7 @@ impl SpotifyClient {
 
         // 2. Albums
         if let Some(albums) = search_data.albums {
-            for album in albums.items {
+            for album in albums.items.into_iter().flatten() {
                 let artists: Vec<String> = album
                     .artists
                     .unwrap_or_default()
@@ -507,7 +510,7 @@ impl SpotifyClient {
 
         // 3. Playlists
         if let Some(playlists) = search_data.playlists {
-            for pl in playlists.items {
+            for pl in playlists.items.into_iter().flatten() {
                 let owner = pl
                     .owner
                     .and_then(|o| o.display_name)
@@ -603,40 +606,6 @@ impl SpotifyClient {
         }
     }
 
-    async fn fetch_page_with_retry(
-        &self,
-        url: &str,
-        token: &str,
-    ) -> Result<reqwest::Response, String> {
-        let mut retries = 0;
-        loop {
-            let resp = self
-                .http
-                .get(url)
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-
-            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                retries += 1;
-                if retries > 5 {
-                    return Err("Spotify API rate limit exceeded (HTTP 429)".into());
-                }
-                let retry_secs = resp
-                    .headers()
-                    .get("Retry-After")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(1);
-                tokio::time::sleep(std::time::Duration::from_secs(retry_secs.clamp(1, 5))).await;
-                continue;
-            }
-
-            return Ok(resp);
-        }
-    }
-
     /// Stream container children page by page via event channel so first paint is instantaneous (<300ms).
     pub async fn stream_children(
         &self,
@@ -644,22 +613,9 @@ impl SpotifyClient {
         event_tx: crossbeam_channel::Sender<SourceEvent>,
         source: SourceTab,
     ) -> Result<(), String> {
-        let Some(ref token) = self.access_token else {
-            return Err("Spotify access token missing".into());
-        };
-
         if parent_id == "spotify:recently_played" {
             let url = "https://api.spotify.com/v1/me/player/recently-played?limit=50";
-            let resp = self.fetch_page_with_retry(url, token).await?;
-            if resp.status() == reqwest::StatusCode::FORBIDDEN {
-                return Err("Missing permissions. Sign out and log in again to grant recently played access.".into());
-            }
-            if !resp.status().is_success() {
-                return Err(format!(
-                    "Failed to fetch recently played: HTTP {}",
-                    resp.status()
-                ));
-            }
+            let resp = self.get(url).await?;
             let data = resp
                 .json::<SpotifyRecentlyPlayedResponse>()
                 .await
@@ -699,19 +655,7 @@ impl SpotifyClient {
 
         if parent_id == "spotify:top_tracks" {
             let url = "https://api.spotify.com/v1/me/top/tracks?limit=50";
-            let resp = self.fetch_page_with_retry(url, token).await?;
-            if resp.status() == reqwest::StatusCode::FORBIDDEN {
-                return Err(
-                    "Missing permissions. Sign out and log in again to grant top tracks access."
-                        .into(),
-                );
-            }
-            if !resp.status().is_success() {
-                return Err(format!(
-                    "Failed to fetch top tracks: HTTP {}",
-                    resp.status()
-                ));
-            }
+            let resp = self.get(url).await?;
             let data = resp
                 .json::<SpotifyPaging<SpotifyTrack>>()
                 .await
@@ -719,6 +663,7 @@ impl SpotifyClient {
             let items: Vec<_> = data
                 .items
                 .into_iter()
+                .flatten()
                 .map(|track| {
                     let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
                     let cover = track
@@ -756,13 +701,7 @@ impl SpotifyClient {
                     "https://api.spotify.com/v1/me/tracks?limit=50&offset={}",
                     current_offset
                 );
-                let resp = self.fetch_page_with_retry(&url, token).await?;
-                if !resp.status().is_success() {
-                    return Err(format!(
-                        "Failed to fetch liked songs: HTTP {}",
-                        resp.status()
-                    ));
-                }
+                let resp = self.get(&url).await?;
 
                 let data = resp
                     .json::<SpotifyPaging<SpotifySavedTrackItem>>()
@@ -775,6 +714,7 @@ impl SpotifyClient {
                 let page_items: Vec<_> = data
                     .items
                     .into_iter()
+                    .flatten()
                     .map(|item| {
                         let track = item.track;
                         let artists: Vec<String> =
@@ -823,10 +763,7 @@ impl SpotifyClient {
                     "https://api.spotify.com/v1/me/playlists?limit=50&offset={}",
                     current_offset
                 );
-                let resp = self.fetch_page_with_retry(&url, token).await?;
-                if !resp.status().is_success() {
-                    return Err(format!("Failed to fetch playlists: HTTP {}", resp.status()));
-                }
+                let resp = self.get(&url).await?;
 
                 let data = resp
                     .json::<SpotifyPaging<SpotifyPlaylistSimple>>()
@@ -839,6 +776,7 @@ impl SpotifyClient {
                 let page_items: Vec<_> = data
                     .items
                     .into_iter()
+                    .flatten()
                     .map(|pl| {
                         let owner = pl
                             .owner
@@ -884,10 +822,7 @@ impl SpotifyClient {
                     "https://api.spotify.com/v1/me/albums?limit=50&offset={}",
                     current_offset
                 );
-                let resp = self.fetch_page_with_retry(&url, token).await?;
-                if !resp.status().is_success() {
-                    return Err(format!("Failed to fetch albums: HTTP {}", resp.status()));
-                }
+                let resp = self.get(&url).await?;
 
                 let data = resp
                     .json::<SpotifyPaging<SpotifySavedAlbumItem>>()
@@ -900,6 +835,7 @@ impl SpotifyClient {
                 let page_items: Vec<_> = data
                     .items
                     .into_iter()
+                    .flatten()
                     .map(|item| {
                         let album = item.album;
                         let artists: Vec<String> = album
@@ -945,16 +881,10 @@ impl SpotifyClient {
             let mut page_idx = 0;
             loop {
                 let url = format!(
-                    "https://api.spotify.com/v1/playlists/{}/items?limit=100&offset={}",
+                    "https://api.spotify.com/v1/playlists/{}/items?limit=50&offset={}",
                     pid, current_offset
                 );
-                let resp = self.fetch_page_with_retry(&url, token).await?;
-                if !resp.status().is_success() {
-                    return Err(format!(
-                        "Failed to fetch playlist tracks: HTTP {}",
-                        resp.status()
-                    ));
-                }
+                let resp = self.get(&url).await?;
 
                 let data = resp
                     .json::<SpotifyPaging<SpotifyPlaylistTrackItem>>()
@@ -967,6 +897,7 @@ impl SpotifyClient {
                 let page_items: Vec<_> = data
                     .items
                     .into_iter()
+                    .flatten()
                     .filter_map(SpotifyPlaylistTrackItem::into_track)
                     .map(|track| {
                         let artists: Vec<String> =
@@ -989,7 +920,7 @@ impl SpotifyClient {
                     })
                     .collect();
 
-                let is_last = raw_len < 100 || total.is_some_and(|t| current_offset + raw_len >= t);
+                let is_last = raw_len < 50 || total.is_some_and(|t| current_offset + raw_len >= t);
                 let _ = event_tx.send(SourceEvent::Children {
                     source,
                     parent_id: parent_id.to_string(),
@@ -1015,13 +946,7 @@ impl SpotifyClient {
                     "https://api.spotify.com/v1/albums/{}/tracks?limit=50&offset={}",
                     aid, current_offset
                 );
-                let resp = self.fetch_page_with_retry(&url, token).await?;
-                if !resp.status().is_success() {
-                    return Err(format!(
-                        "Failed to fetch album tracks: HTTP {}",
-                        resp.status()
-                    ));
-                }
+                let resp = self.get(&url).await?;
 
                 let data = resp
                     .json::<SpotifyPaging<SpotifyTrack>>()
@@ -1034,6 +959,7 @@ impl SpotifyClient {
                 let page_items: Vec<_> = data
                     .items
                     .into_iter()
+                    .flatten()
                     .map(|track| {
                         let artists: Vec<String> =
                             track.artists.into_iter().map(|a| a.name).collect();
@@ -1102,20 +1028,18 @@ impl SpotifyClient {
     pub fn user_name(&self) -> Option<&str> {
         None
     }
-    pub fn client_id(&self) -> Option<&str> {
-        None
-    }
     pub fn last_error(&self) -> Option<&str> {
         None
     }
-    pub fn access_token(&self) -> Option<&str> {
-        None
-    }
-    pub fn refresh_token(&self) -> Option<&str> {
-        None
-    }
     pub async fn ensure_fresh_token(&mut self) {}
-    pub async fn login(&mut self, _client_id: &str) -> Result<String, String> {
+    pub fn can_stream(&self) -> bool {
+        false
+    }
+    pub async fn login(
+        &mut self,
+        _client_id: &str,
+        _progress: impl Fn(&str),
+    ) -> Result<String, String> {
         Err("Spotify feature not enabled in build".into())
     }
     pub async fn search(&self, _query: &str, _page: usize) -> Result<Vec<BrowseItem>, String> {
@@ -1153,10 +1077,8 @@ mod tests {
 
     #[test]
     fn test_spotify_client_id_and_redirect_uri() {
-        assert_eq!(
-            DEFAULT_SPOTIFY_CLIENT_ID,
-            "65b708073fc0480ea92a077233ca87bd"
-        );
+        // The Web API and playback must not share a client ID
+        assert_ne!(DEFAULT_SPOTIFY_CLIENT_ID, SPOTIFY_STREAMING_CLIENT_ID);
         #[cfg(feature = "spotify")]
         {
             assert_eq!(
@@ -1168,6 +1090,34 @@ mod tests {
                 "http://127.0.0.1:8898/login"
             );
         }
+    }
+
+    #[test]
+    #[cfg(feature = "spotify")]
+    fn paging_keeps_the_raw_count_and_skips_null_entries() {
+        let page: SpotifyPaging<SpotifyPlaylistSimple> =
+            serde_json::from_str(r#"{"items":[null,{"id":"p1","name":"Mix"}],"total":2}"#)
+                .expect("a null entry does not fail the whole page");
+        // Pagination advances by what Spotify sent, not by what is listed
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items.into_iter().flatten().count(), 1);
+    }
+
+    #[test]
+    #[cfg(feature = "spotify")]
+    fn api_errors_carry_spotifys_message() {
+        let status = reqwest::StatusCode::FORBIDDEN;
+        assert_eq!(
+            describe_api_error(
+                status,
+                r#"{"error":{"status":403,"message":"Insufficient client scope"}}"#
+            ),
+            "Spotify API error: HTTP 403 Forbidden (Insufficient client scope)"
+        );
+        assert_eq!(
+            describe_api_error(status, "<html>"),
+            "Spotify API error: HTTP 403 Forbidden"
+        );
     }
 
     #[test]

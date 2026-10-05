@@ -27,10 +27,20 @@ impl SourceRuntime {
 
         let creds = crate::config::credentials::Credentials::load();
         let yt_cookie = creds.youtube_cookie.clone();
-        let sp_client_id = Some(crate::sources::spotify::DEFAULT_SPOTIFY_CLIENT_ID.to_string());
+        // Older versions signed in to the Web API with the streaming client ID.
+        // Those tokens are dropped, so that the next sign-in replaces them.
+        let stored_client_id = creds.spotify_client_id.as_deref().filter(|id| {
+            !id.is_empty() && *id != crate::sources::spotify::SPOTIFY_STREAMING_CLIENT_ID
+        });
+        let sp_client_id = Some(
+            stored_client_id
+                .unwrap_or(crate::sources::spotify::DEFAULT_SPOTIFY_CLIENT_ID)
+                .to_string(),
+        );
         let (sp_access, sp_refresh) = creds
             .spotify_token_cache
             .as_deref()
+            .filter(|_| stored_client_id.is_some())
             .map(|cache_str| {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(cache_str) {
                     let acc = val
@@ -192,12 +202,14 @@ async fn handle_request(
             SourceTab::Spotify => {
                 let mut sp = spotify_client.lock().await;
                 sp.ensure_fresh_token().await;
-                let connected = sp.is_authenticated();
+                let connected = sp.is_authenticated() && sp.can_stream();
                 let user_name = sp.user_name().map(|s| s.to_string());
-                let error = if !connected {
-                    sp.last_error().map(|s| s.to_string())
-                } else {
+                let error = if connected {
                     None
+                } else if sp.is_authenticated() {
+                    Some("Playback is not signed in yet. Press Enter to finish.".to_string())
+                } else {
+                    sp.last_error().map(|s| s.to_string())
                 };
                 let _ = event_tx.send(SourceEvent::AuthState {
                     source,
@@ -230,18 +242,14 @@ async fn handle_request(
         SourceRequest::Login { source, payload } => match source {
             SourceTab::Spotify => {
                 let mut sp = spotify_client.lock().await;
-                match sp.login(&payload).await {
+                let progress = |message: &str| {
+                    let _ = event_tx.send(SourceEvent::LoginProgress {
+                        source,
+                        message: message.to_string(),
+                    });
+                };
+                match sp.login(&payload, progress).await {
                     Ok(user_info) => {
-                        let mut creds = crate::config::credentials::Credentials::load();
-                        creds.spotify_client_id = sp.client_id().map(ToString::to_string);
-                        if let Some(tok) = sp.access_token() {
-                            let cache = serde_json::json!({
-                                "access_token": tok,
-                                "refresh_token": sp.refresh_token(),
-                            });
-                            creds.spotify_token_cache = Some(cache.to_string());
-                        }
-                        let _ = creds.save();
                         let _ = event_tx.send(SourceEvent::AuthState {
                             source,
                             connected: true,

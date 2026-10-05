@@ -1,6 +1,8 @@
 pub mod local;
 pub mod runtime;
 pub mod spotify;
+#[cfg(feature = "spotify")]
+pub mod spotify_oauth;
 pub mod youtube;
 pub mod ytdlp;
 
@@ -109,6 +111,8 @@ pub struct SourceView {
     pub next_page: usize,
     pub login_input: String,
     pub awaiting_login_input: bool,
+    /// Progress of a sign-in that is still running.
+    pub login_status: Option<String>,
 }
 
 impl SourceView {
@@ -271,6 +275,11 @@ pub enum SourceEvent {
         connected: bool,
         user_name: Option<String>,
         error: Option<String>,
+    },
+    /// What a sign-in that is still running is waiting for.
+    LoginProgress {
+        source: SourceTab,
+        message: String,
     },
     Roots {
         source: SourceTab,

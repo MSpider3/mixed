@@ -12,8 +12,10 @@ No client secret or developer account is required. `mixed` uses the [OAuth 2.0 a
 
 1. Switch to Spotify (`Ctrl+2` / `Alt+2`) and open the Library tab (`F3`).
 2. Press `Enter`.
-3. Your browser automatically opens Spotify's authorization page. Click **Agree**.
-4. Spotify redirects back to `mixed`. That's it!
+3. Your browser opens Spotify's authorization page for library access. Click **Agree**.
+4. A second authorization page opens, for playback (it is shown as Spotify's own desktop app). Click **Agree** again.
+
+The Library tab shows which of the two steps `mixed` is waiting for. Each one must be approved within three minutes. If one fails, press `Enter` again: a step that already succeeded is not repeated.
 
 Your library (Liked Songs, full Playlists without 500-track limits, and Albums) will immediately appear and songs are ready to stream.
 
@@ -25,7 +27,11 @@ If you prefer to use your own personal Spotify Developer Client ID:
    ```
    http://127.0.0.1:8898/login
    ```
-3. Type or paste your Client ID at the `Credentials:` prompt in `mixed` before pressing `Enter`.
+3. In the Spotify Library tab (`F3`) press `c`, type or paste your Client ID at the `Credentials:` prompt and press `Enter` (`Esc` cancels).
+
+This also works while you are signed in, for example when the built-in Client ID is being rate-limited: only the library approval is repeated. Entering `default` at the prompt switches back to the built-in Client ID.
+
+Apps you create yourself run in Spotify's Development Mode, which offers a smaller Web API than the built-in Client ID, so Spotify may refuse some requests that work with the built-in one.
 
 ## What is stored
 
@@ -39,21 +45,21 @@ Credentials are kept in `credentials.json` in the `mixed` configuration director
 
 ```json
 {
-    "spotify_client_id": "65b708073fc0480ea92a077233ca87bd",
+    "spotify_client_id": "d420a117a32841c2b3474932e49fb54b",
     "spotify_token_cache": "{\"access_token\":\"…\",\"refresh_token\":\"…\"}"
 }
 ```
 
 On Linux and macOS the file is written with owner-only permissions (`0600`). You do not need to edit it by hand.
 
-`librespot` also keeps its own login and audio cache in the `spotify` folder of the `mixed` cache directory (`~/.cache/mixed/spotify/` on Linux).
+`librespot` keeps the playback login (`credentials.json`) and up to 1 GB of audio (`files/`) in the `spotify` folder of the `mixed` cache directory (`~/.cache/mixed/spotify/` on Linux).
 
 ## How authentication works
 
-Two things are authenticated from the single sign-in:
+Search and library browsing go through the Web API; audio goes through `librespot`. Spotify serves the two to different client IDs, so signing in takes two approvals (other `librespot` players such as ncspot and spotify-player work the same way):
 
-1. **Web API token** — used for search and for browsing your library. Access tokens last one hour. `mixed` refreshes the token automatically (at startup and before a request when the token is older than 45 minutes) and saves the new tokens.
-2. **`librespot` session** — used for audio. It connects the first time you play a Spotify track, using its own saved login if there is one and otherwise the Web API access token. The first track therefore takes a little longer to start; if the connection cannot be made within 15 seconds the track fails with `Spotify connection failed`.
+1. **Web API token** — issued to the client ID that ncspot, spotify-player and spotatui share, or to your own. Access tokens last one hour. `mixed` refreshes the token automatically (at startup and before a request when the token is older than 45 minutes) and saves the new tokens.
+2. **`librespot` login** — issued to Spotify's desktop client ID. At sign-in `librespot` exchanges it for a reusable login that does not expire hourly. The session connects with it the first time you play a Spotify track, so that track takes a little longer to start; if the connection cannot be made within 15 seconds the track fails with `Spotify connection failed`.
 
 ## Using Spotify in `mixed`
 
@@ -70,11 +76,12 @@ Podcast episodes and local files inside a Spotify playlist are not listed.
 ## Troubleshooting
 
 - **The browser shows "INVALID_CLIENT: Invalid redirect URI":** the Redirect URI in your Spotify app does not match `http://127.0.0.1:8898/login` exactly.
-- **Sign-in never completes:** make sure nothing else is using port `8898`, then press `Enter` in the Library tab to try again.
-- **`Search failed: HTTP 429`:** Spotify is rate-limiting your Client ID. A rate-limited search is retried once automatically; if it still fails, wait a moment and search again.
+- **Sign-in never completes:** make sure nothing else is using port `8989` (`8898` with your own Client ID), then press `Enter` in the Library tab to try again. If no browser opens, copy the `Spotify sign-in URL` line from `mixed.log` into a browser on the same machine.
+- **`Spotify is rate limiting requests. Try again in N s.`:** Spotify is rate-limiting the Client ID, which for the built-in one is shared with other players. Waits of up to 30 seconds are handled automatically; longer ones are reported like this.
 - **Signed in before but now "Not connected":** the saved tokens were rejected. Sign in again from the Library tab.
-- **Changing the Client ID:** sign in again with the new one; the old tokens no longer apply.
-- **Details of an error:** `mixed` writes diagnostics to `mixed.log` in its cache directory (`~/.cache/mixed/mixed.log` on Linux).
+- **Changing the Client ID:** press `c` in the Library tab and sign in with the new one; the old tokens no longer apply.
+- **`Playback sign-in is no longer valid`:** Spotify rejected the stored playback login. Press `Enter` in the Library tab; only the playback approval is repeated.
+- **Details of an error:** `mixed` writes diagnostics to `mixed.log` in its cache directory (`~/.cache/mixed/mixed.log` on Linux), including the response Spotify gave to a failed request.
 
 ## Building without Spotify
 

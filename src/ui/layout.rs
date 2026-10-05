@@ -1081,7 +1081,12 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
         None => return,
     };
 
-    if !view.connected {
+    if !view.connected || view.awaiting_login_input {
+        let (status, status_color) = if view.connected {
+            ("Connected. Enter a Client ID to sign in with it.", C_FG)
+        } else {
+            ("Not connected. Press Enter to sign in.", C_RED)
+        };
         let mut lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -1093,10 +1098,7 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled("  Status: ", Style::default().fg(C_DIM)),
-                Span::styled(
-                    "Not connected. Press Enter to sign in.",
-                    Style::default().fg(C_RED),
-                ),
+                Span::styled(status, Style::default().fg(status_color)),
             ]),
             Line::from(""),
         ];
@@ -1112,7 +1114,7 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(C_FG),
                 )));
                 lines.push(Line::from(Span::styled(
-                    "  • (Optional) Type a custom Client ID before pressing Enter.",
+                    "  • (Optional) Press c to sign in with your own Client ID.",
                     Style::default().fg(C_DIM),
                 )));
             }
@@ -1139,6 +1141,14 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled("  Error: ", Style::default().fg(C_RED)),
                 Span::styled(err.as_str(), Style::default().fg(C_RED)),
             ]));
+        }
+
+        if let Some(ref status) = view.login_status {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", status),
+                Style::default().fg(C_ACCENT2).add_modifier(Modifier::BOLD),
+            )));
         }
 
         if view.awaiting_login_input {
@@ -1413,7 +1423,16 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Span::styled("Ctrl+2 / Alt+2", Style::default().fg(C_CYAN)),
             Span::styled(" •  ", Style::default().fg(C_DIM)),
             Span::styled(
-                "Switch to Spotify source (requires Premium & Client ID)",
+                "Switch to Spotify source (requires Premium)",
+                Style::default().fg(C_FG),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("c", Style::default().fg(C_CYAN)),
+            Span::styled(" •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Sign in with your own Spotify Client ID (Spotify Library)",
                 Style::default().fg(C_FG),
             ),
         ]),

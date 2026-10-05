@@ -1747,3 +1747,53 @@ fn test_remote_browse_space_toggles_container_expansion() {
     assert!(app.youtube_view.nav_stack.is_empty());
     assert_eq!(app.youtube_view.cursor, 0);
 }
+
+#[test]
+fn test_spotify_client_id_prompt_is_reachable_with_c() {
+    use mixed::app::{ActivePanel, SourceTab};
+
+    let mut app = create_test_app();
+    app.switch_source(SourceTab::Spotify);
+    app.active_panel = ActivePanel::Library;
+    // Also while signed in: that is when a rate-limited shared Client ID gets replaced
+    app.spotify_view.connected = true;
+
+    events::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+    );
+    assert!(app.spotify_view.awaiting_login_input);
+
+    for c in "abc123".chars() {
+        events::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        );
+    }
+    assert_eq!(app.spotify_view.login_input, "abc123");
+
+    events::handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.spotify_view.awaiting_login_input);
+    assert!(
+        !app.spotify_view.connected,
+        "the sign-in panel shows the progress of the new sign-in"
+    );
+    assert!(app.playlist.is_empty(), "Enter submitted the prompt only");
+}
+
+#[test]
+fn test_rejected_spotify_playback_sign_in_asks_to_sign_in_again() {
+    use mixed::audio::player::PlayerEvent;
+
+    let mut app = create_test_app();
+    app.spotify_view.connected = true;
+
+    app.handle_player_event(PlayerEvent::SpotifySignInLost);
+
+    assert!(!app.spotify_view.connected);
+    assert!(app
+        .spotify_view
+        .error
+        .as_deref()
+        .is_some_and(|e| e.contains("sign in again")));
+}

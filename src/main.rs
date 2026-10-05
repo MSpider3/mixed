@@ -21,9 +21,43 @@ use mixed::sys::MediaCommand;
 use mixed::ui::events;
 use mixed::ui::layout;
 
+/// Writes `log` records to stderr, which `main` redirects into `mixed.log`.
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::max_level()
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            eprintln!(
+                "{} {:5} {}: {}",
+                secs,
+                record.level(),
+                record.target(),
+                record.args()
+            );
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "spotify")]
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    if log::set_logger(&StderrLogger).is_ok() {
+        log::set_max_level(if std::env::var("MIXED_DEBUG").is_ok() {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        });
+    }
 
     // Parse CLI options before any terminal setup or audio redirection
     let cli_action = mixed::cli::CliOptions::parse(std::env::args());
