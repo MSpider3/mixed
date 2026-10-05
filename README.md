@@ -78,14 +78,23 @@ Quickly explore artist discography, lyrics, or background information in your de
 - In the **Track (F4)** view, click directly on the **song title** to search for the song, or click the **artist name** to search for the artist.
 - All browser subcommands run with isolated `stdio` redirected to `/dev/null`, preventing any external browser warnings or logs from corrupting the TUI.
 
+### 🎤 Lyrics for Every Source
+Lyrics are shown for local files, Spotify and YouTube Music alike, synced to the music where possible:
+- A track's own lyrics come first: a `.lrc` file next to a local song, or the lyrics in its tags.
+- Otherwise they are looked up online when the track starts: Spotify's own lyrics for Spotify tracks, then [Karalyr](https://www.karalyr.com) (word-by-word) and [LRCLIB](https://lrclib.net).
+- What is found is saved, as `Song.lrc` next to a local song or in the cache for streamed tracks, so each track is looked up once.
+- Press `y` in the **Track (F4)** view to choose different lyrics when the wrong ones were found. A `.lrc` file you made yourself is never replaced without asking.
+
+See the [Lyrics guide](docs/lyrics.md) for details.
+
 ### 🌐 Multi-Source Streaming (Spotify, YouTube Music & Local)
 Seamlessly search, browse, enqueue, and play music across multiple sources in one unified player:
 - **Local Library (`Ctrl+1` / `Alt+1`)**: Zero-dependency offline audio playback for FLAC, MP3, WAV, and OGG files with embedded metadata and synchronized lyrics.
-- **Spotify (`Ctrl+2` / `Alt+2`)**: Search and library navigation (Liked Songs, Playlists, Albums) with raw PCM playback powered by `librespot` (requires Spotify Premium).
-- **YouTube Music (`Ctrl+3` / `Alt+3`)**: Search and browse YouTube Music tracks with background audio caching and 50% sequential prefetch via `yt-dlp`. Playback starts while the track is still downloading. Search and playback work without an account; a browser cookie adds your own library.
+- **Spotify (`Ctrl+2` / `Alt+2`)**: Search and library navigation (Liked Songs, Recently Played, Top Tracks, Playlists, Albums) with raw PCM playback powered by `librespot`, album names and cover art (requires Spotify Premium).
+- **YouTube Music (`Ctrl+3` / `Alt+3`)**: Search and browse YouTube Music tracks with background audio caching and 50% sequential prefetch via `yt-dlp`. Playback starts while the track is still downloading. Search works without an account; a browser cookie adds your own library and is used for downloads when YouTube asks for a signed-in session. `yt-dlp` needs a JavaScript runtime (Deno or Node.js).
 - **Unified Queue (`Ctrl+4` / `Alt+4`)**: Mix tracks from local files, Spotify, and YouTube in a single queue with automatic cross-source advancing. The queue, including remote tracks, is restored on the next launch.
 
-Remote libraries and search results are shown as a tree like the local library: `Enter` opens and closes albums, playlists and folders. Each source remembers its own tab and cursor. A track that fails to load is skipped, and playback stops after three failures in a row. Lyrics are available for local files only.
+Remote libraries and search results are shown as a tree like the local library: `Enter` opens and closes albums, playlists and folders. Each source remembers its own tab and cursor. A track that fails to load is skipped, and playback stops after three failures in a row. Lyrics are shown for every source: from the song's own `.lrc` file or tags, from Spotify, or looked up online (see [Lyrics](docs/lyrics.md)).
 
 ---
 
@@ -93,7 +102,7 @@ Remote libraries and search results are shown as a tree like the local library: 
 
 > **Runtime Requirements:**
 > - **Local Playback**: Fully standalone and self-contained binary with all decoders statically compiled in. Zero external runtime dependencies.
-> - **YouTube Music Streaming**: Requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) installed and available in your system `$PATH` (or set `yt_dlp_path` in `config.json`).
+> - **YouTube Music Streaming**: Requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) installed and available in your system `$PATH` (or set `yt_dlp_path` in `config.json`), and a JavaScript runtime for it ([Deno](https://deno.com) or Node.js) enabled through `yt_dlp_args` in `config.json`. The [YouTube Music guide](docs/youtube.md#javascript-runtime) has the exact lines.
 > - **Spotify Streaming**: Requires **Spotify Premium**. You sign in from the app with two approvals in your browser (PKCE authorization code flow, no secret and no developer account required). A Spotify Developer Client ID of your own is optional.
 > - **Shortcut Fallback**: `Ctrl+1..4` and `Shift+Enter` are only reported by terminals that support the kitty keyboard protocol (Kitty, Foot, WezTerm, Ghostty, recent Alacritty). Elsewhere, use `Alt+1..4` to switch sources.
 
@@ -101,7 +110,8 @@ Remote libraries and search results are shown as a tree like the local library: 
 
 For detailed instructions on configuring streaming sources, see the dedicated guides:
 - **[Spotify Setup & Authentication](docs/spotify.md)** — Sign in from the app, optionally with your own Client ID, and see what is stored and how playback connects.
-- **[YouTube Music Setup](docs/youtube.md)** — Install `yt-dlp`, optionally sign in with a browser cookie to see your library, and learn how caching and play-while-downloading work.
+- **[Lyrics](docs/lyrics.md)** — Where lyrics come from, where they are saved, and how to choose other lyrics for a track.
+- **[YouTube Music Setup](docs/youtube.md)** — Install `yt-dlp` and a JavaScript runtime, set up `config.json`, optionally sign in with a browser cookie, and learn how caching and play-while-downloading work.
 
 ### Files & Configuration
 
@@ -109,10 +119,14 @@ For detailed instructions on configuring streaming sources, see the dedicated gu
 
 | File | Purpose |
 |---|---|
-| `~/.config/mixed/config.json` | Settings: music directory, volume, visualizer, notifications, `yt_dlp_path`, `yt_cache_mb` |
+| `~/.config/mixed/config.json` | Settings: music directory, volume, visualizer, notifications, `yt_dlp_path`, `yt_dlp_args`, `yt_cache_mb`, `save_lyrics_next_to_songs` |
 | `~/.config/mixed/credentials.json` | Spotify Client ID and tokens, YouTube cookie (owner-only permissions) |
+| `~/.config/mixed/yt_cookies_….txt` | The YouTube cookie in the format `yt-dlp` reads, written when a download needs it (owner-only permissions) |
 | `~/.local/share/mixed/state.json` | Saved queue and playback position |
 | `~/.cache/mixed/yt/` | Downloaded YouTube audio (limited by `yt_cache_mb`, default 512 MB) |
+| `~/.cache/mixed/lyrics/` | Lyrics found online for Spotify and YouTube tracks |
+| `~/.cache/mixed/spotify/` | Spotify playback login and up to 1 GB of cached audio |
+| `~/.cache/mixed/covers/` | Downloaded cover art of Spotify and YouTube tracks |
 | `~/.cache/mixed/mixed.log` | Diagnostics and errors (rotated at 5 MB). Set `MIXED_DEBUG=1` to print them to the terminal instead |
 
 ### Method 1: Pre-compiled Binaries (Recommended)
@@ -210,9 +224,9 @@ mixed --play /path/to/song.flac
 | `k` / `j` / `↑` / `↓` | Scroll / Navigate list items | Navigation |
 | `q` / `Ctrl+C` | Quit / Graceful Exit | System |
 | `Esc` | Back to the queue view | Navigation |
-| `Space` / `p` | Play / Pause toggle | Playback |
+| `Space` / `p` | Play / Pause toggle (starts the track again after a stop) | Playback |
 | `S` | Stop playback | Playback |
-| `n` / `l` / `→` | Next track | Playback |
+| `n` / `l` / `→` | Next track (the last track of the queue keeps playing) | Playback |
 | `h` / `←` | Previous track (restarts track if >3s elapsed) | Playback |
 | `a` / `d` | Seek backward / forward 5 seconds | Playback |
 | `+` / `=` | Volume up | Playback |
@@ -226,11 +240,14 @@ mixed --play /path/to/song.flac
 | `Shift + Enter` | Enqueue selected track or folder to play next | Library / Search |
 | `o` / `←` / `→` | Toggle / Collapse/Expand directory tree | Local Library |
 | `Delete` | Remove selected track from the queue | Queue |
+| `Backspace` | Go up one folder | Library |
 | `Backspace` | Clear the entire queue (stops playback) | Queue |
 | `f` / `g` | Move selected queue item up / down | Queue |
 | `/` | Open search for the active source | Library |
 | `v` | Toggle spectrum/braille visualizer mode | Display |
 | `m` | Toggle full lyrics / 3-line timed lyrics view | Display |
+| `y` | Choose other lyrics for the playing track | Now Playing |
+| `↑` / `↓`, `Enter`, `/`, `Esc` | Move, use the selected row, search with your own words, close | Lyrics list |
 | `b` / `B` | Search artist in default web browser | Web Search |
 
 ### Mouse Interaction

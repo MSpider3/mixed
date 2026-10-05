@@ -24,6 +24,13 @@ pub struct LyricsData {
     pub word_timestamps: Vec<Vec<WordTimestamp>>,
 }
 
+/// Lyrics of a track: synced to the music, or plain text.
+#[derive(Debug, Clone)]
+pub enum Lyrics {
+    Synced(LyricsData),
+    Plain(Vec<String>),
+}
+
 impl LyricsData {
     /// Find the index of the active line at the given elapsed time.
     pub fn find_active_line(&self, elapsed_secs: f64) -> usize {
@@ -83,6 +90,50 @@ pub fn load_lyrics_from_metadata(audio_path: &Path) -> Option<LyricsData> {
     parse_lrc_content(lyrics_str)
 }
 
+/// True for LRC metadata tags like [ar:Artist], [ti:Title], [length:03:45], etc.
+fn is_metadata_tag(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    [
+        "[ar:", "[ti:", "[al:", "[by:", "[offset:", "[re:", "[ve:", "[length:", "[id:", "[la:",
+    ]
+    .iter()
+    .any(|tag| lower.starts_with(tag))
+}
+
+/// Read a lyrics file, which may hold LRC or plain text.
+pub fn read_lyrics_file(path: &Path) -> Option<Lyrics> {
+    if std::fs::metadata(path).ok()?.len() > MAX_LRC_FILE_BYTES {
+        return None;
+    }
+    parse_lyrics_text(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Load the lyrics embedded in a track's tags, synced or plain.
+pub fn load_embedded_lyrics(audio_path: &Path) -> Option<Lyrics> {
+    use lofty::{file::TaggedFileExt, probe::Probe, tag::ItemKey};
+    let tagged = Probe::open(audio_path).and_then(|p| p.read()).ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    parse_lyrics_text(tag.get_string(&ItemKey::Lyrics)?)
+}
+
+/// Parse lyrics text that is either LRC (line- or word-synced) or plain text.
+pub fn parse_lyrics_text(content: &str) -> Option<Lyrics> {
+    if let Some(data) = parse_lrc_content(content) {
+        return Some(Lyrics::Synced(data));
+    }
+    let lines: Vec<String> = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !is_metadata_tag(line))
+        .take(MAX_TOTAL_LYRIC_LINES)
+        .map(String::from)
+        .collect();
+    // Blank lines separate verses, but they are not lyrics by themselves
+    let first = lines.iter().position(|line| !line.is_empty())?;
+    let last = lines.iter().rposition(|line| !line.is_empty())?;
+    Some(Lyrics::Plain(lines[first..=last].to_vec()))
+}
+
 /// Parse LRC file content into structured lyrics data with full word-by-word timestamp support.
 pub fn parse_lrc_content(content: &str) -> Option<LyricsData> {
     let mut lines: Vec<LrcLine> = Vec::new();
@@ -94,19 +145,7 @@ pub fn parse_lrc_content(content: &str) -> Option<LyricsData> {
             continue;
         }
 
-        // Skip metadata tags like [ar:Artist], [ti:Title], [length:03:45], etc.
-        let lower = raw_line.to_lowercase();
-        if lower.starts_with("[ar:")
-            || lower.starts_with("[ti:")
-            || lower.starts_with("[al:")
-            || lower.starts_with("[by:")
-            || lower.starts_with("[offset:")
-            || lower.starts_with("[re:")
-            || lower.starts_with("[ve:")
-            || lower.starts_with("[length:")
-            || lower.starts_with("[id:")
-            || lower.starts_with("[la:")
-        {
+        if is_metadata_tag(raw_line) {
             continue;
         }
 

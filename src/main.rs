@@ -380,7 +380,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MediaCommand::Play => app.play(),
                         MediaCommand::Pause => app.pause(),
                         MediaCommand::Stop => app.stop(),
-                        MediaCommand::Next => app.next_track(),
+                        MediaCommand::Next => app.skip_to_next(),
                         MediaCommand::Previous => app.prev_track(),
                         MediaCommand::Seek(offset) => {
                             let current = app.player().map(|p| p.elapsed_ms()).unwrap_or(0);

@@ -395,6 +395,10 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     f.render_widget(ratatui::widgets::Clear, area);
+    if let Some(ref picker) = app.lyrics_picker {
+        draw_lyrics_picker(f, app, picker, area);
+        return;
+    }
     if let Some(entry) = app.playlist.current_entry() {
         if app.show_full_lyrics {
             if let Some(ref lyrics_data) = app.current_lyrics {
@@ -405,6 +409,10 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
                     app.display_elapsed_secs(),
                     app.lyrics_scroll,
                 );
+                return;
+            }
+            if let Some(ref lines) = app.current_plain_lyrics {
+                lyrics_widget::render_untimed_lyrics(f, area, lines, app.lyrics_scroll);
                 return;
             }
             match &entry.metadata.lyrics {
@@ -426,14 +434,10 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
                     lyrics_widget::render_untimed_lyrics(f, area, lines, app.lyrics_scroll);
                 }
                 LyricsKind::None => {
-                    let msg = if matches!(
-                        entry.id,
-                        crate::data::track::TrackRef::Spotify(_)
-                            | crate::data::track::TrackRef::YouTube(_)
-                    ) {
-                        "Lyrics not available (local files only). Press 'm' to go back"
+                    let msg = if app.lyrics_searching {
+                        "Searching for lyrics..."
                     } else {
-                        "No Lyrics Available. Press 'm' to go back"
+                        "No lyrics found. Press 'y' to search, 'm' to go back"
                     };
                     let hint =
                         Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(C_DIM))))
@@ -451,7 +455,11 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
                 );
                 return;
             }
-            match &entry.metadata.lyrics {
+            let lyrics = match &app.current_plain_lyrics {
+                Some(_) => &LyricsKind::Untimed(Vec::new()),
+                None => &entry.metadata.lyrics,
+            };
+            match lyrics {
                 LyricsKind::Timed(lines) => {
                     let data = crate::data::lyrics::LyricsData {
                         lines: lines.clone(),
@@ -478,10 +486,105 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect) {
                         Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
                     f.render_widget(widget, area);
                 }
+                LyricsKind::None if app.lyrics_searching => {
+                    let hint = Paragraph::new(Line::from(Span::styled(
+                        "Searching for lyrics...",
+                        Style::default().fg(C_DIM),
+                    )))
+                    .alignment(ratatui::layout::Alignment::Center);
+                    f.render_widget(hint, area);
+                }
                 LyricsKind::None => {}
             }
         }
     }
+}
+
+/// The list of other lyrics for the playing track (opened with `y`).
+fn draw_lyrics_picker(f: &mut Frame, app: &App, picker: &crate::app::LyricsPicker, area: Rect) {
+    use crate::sources::LyricsSync;
+
+    let mut rows = vec![
+        "Automatic: search again".to_string(),
+        "No lyrics for this track".to_string(),
+    ];
+    rows.extend(picker.matches.iter().map(|m| {
+        let mut row = format!("{} - {}", m.title, m.artist);
+        if let Some(album) = m.album.as_deref().filter(|a| !a.is_empty()) {
+            row.push_str(&format!(" | {}", album));
+        }
+        if let Some(secs) = m.duration_secs {
+            row.push_str(&format!(" | {}:{:02}", secs / 60, secs % 60));
+        }
+        let sync = match m.sync {
+            LyricsSync::Word => "word-synced",
+            LyricsSync::Line => "synced",
+            LyricsSync::Plain => "plain text",
+        };
+        row.push_str(&format!(" | {} | {}", sync, m.provider));
+        row
+    }));
+
+    let title = app
+        .playlist
+        .current_entry()
+        .map(|e| e.metadata.display_title(app.config.strip_track_numbers))
+        .unwrap_or_default();
+    let state = if picker.loading {
+        " (searching...)".to_string()
+    } else if let Some(ref error) = picker.error {
+        format!(" ({})", error)
+    } else {
+        format!(" ({} found)", picker.matches.len())
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("  Lyrics for {}", title),
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(state, Style::default().fg(C_DIM)),
+    ])];
+
+    // Header and footer take a line each; the list scrolls to keep the cursor in view
+    let visible = (area.height as usize).saturating_sub(2).max(1);
+    let first = (picker.cursor + 1).saturating_sub(visible);
+    for (idx, row) in rows.iter().enumerate().skip(first).take(visible) {
+        let (prefix, style) = if idx == picker.cursor {
+            (
+                "  > ",
+                Style::default().fg(C_ACCENT2).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("    ", Style::default().fg(C_FG))
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", prefix, row),
+            style,
+        )));
+    }
+
+    let footer = if let Some((_, ref path)) = picker.confirm_replace {
+        Span::styled(
+            format!(
+                "  {} is your own file. Replace it? y: yes, any other key: no",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            Style::default().fg(C_ORANGE).add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(ref input) = picker.input {
+        Span::styled(
+            format!("  Search: {}█  (Enter: search, Esc: cancel)", input),
+            Style::default().fg(C_ACCENT2),
+        )
+    } else {
+        Span::styled(
+            "  Enter: use  |  /: search with your own words  |  Esc: close",
+            Style::default().fg(C_DIM),
+        )
+    };
+    lines.push(Line::from(footer));
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_visualizer(f: &mut Frame, app: &mut App, area: Rect) {
@@ -1430,9 +1533,9 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from(vec![
             Span::raw("  "),
             Span::styled("c", Style::default().fg(C_CYAN)),
-            Span::styled(" •  ", Style::default().fg(C_DIM)),
+            Span::styled("              •  ", Style::default().fg(C_DIM)),
             Span::styled(
-                "Sign in with your own Spotify Client ID (Spotify Library)",
+                "Sign in with your own Spotify Client ID",
                 Style::default().fg(C_FG),
             ),
         ]),
@@ -1465,10 +1568,10 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("Remote Lyrics", Style::default().fg(C_CYAN)),
-            Span::styled("  •  ", Style::default().fg(C_DIM)),
+            Span::styled("Lyrics", Style::default().fg(C_CYAN)),
+            Span::styled("         •  ", Style::default().fg(C_DIM)),
             Span::styled(
-                "Lyrics view is local-only; remote tracks display notice",
+                "Shown for all sources, found online",
                 Style::default().fg(C_FG),
             ),
         ]),
@@ -1482,7 +1585,10 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Span::raw("  "),
             Span::styled("Space / p", Style::default().fg(C_CYAN)),
             Span::styled("    •  ", Style::default().fg(C_DIM)),
-            Span::styled("Play / Pause toggle", Style::default().fg(C_FG)),
+            Span::styled(
+                "Play / Pause (restarts after a stop)",
+                Style::default().fg(C_FG),
+            ),
         ]),
         Line::from(vec![
             Span::raw("  "),
@@ -1494,13 +1600,19 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Span::raw("  "),
             Span::styled("n / l / →", Style::default().fg(C_CYAN)),
             Span::styled("    •  ", Style::default().fg(C_DIM)),
-            Span::styled("Next track", Style::default().fg(C_FG)),
+            Span::styled(
+                "Next track (stays on the last one)",
+                Style::default().fg(C_FG),
+            ),
         ]),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("p / h / ←", Style::default().fg(C_CYAN)),
-            Span::styled("    •  ", Style::default().fg(C_DIM)),
-            Span::styled("Previous track", Style::default().fg(C_FG)),
+            Span::styled("h / ←", Style::default().fg(C_CYAN)),
+            Span::styled("        •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Previous track / restart after 3 s",
+                Style::default().fg(C_FG),
+            ),
         ]),
         Line::from(vec![
             Span::raw("  "),
@@ -1594,7 +1706,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Span::styled("Backspace", Style::default().fg(C_CYAN)),
             Span::styled("    •  ", Style::default().fg(C_DIM)),
             Span::styled(
-                "Clear the entire queue (stops playback)",
+                "Folder up (Library) / Clear queue",
                 Style::default().fg(C_FG),
             ),
         ]),
@@ -1637,6 +1749,24 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Span::styled("            •  ", Style::default().fg(C_DIM)),
             Span::styled(
                 "Toggle full lyrics / 3-line timed lyrics view",
+                Style::default().fg(C_FG),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("y", Style::default().fg(C_CYAN)),
+            Span::styled("            •  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Choose other lyrics (Now Playing)",
+                Style::default().fg(C_FG),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Enter, /, Esc", Style::default().fg(C_CYAN)),
+            Span::styled("•  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Lyrics list: use / search / close",
                 Style::default().fg(C_FG),
             ),
         ]),

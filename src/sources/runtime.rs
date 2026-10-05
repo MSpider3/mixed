@@ -64,6 +64,7 @@ impl SourceRuntime {
 
         let yt_cache_mb = config.yt_cache_mb;
         let yt_dlp_path = config.yt_dlp_path.clone();
+        let yt_dlp_args = config.yt_dlp_args.clone();
 
         // Evict stale YouTube cache at startup
         crate::sources::ytdlp::YtDlp::evict_cache(yt_cache_mb);
@@ -98,7 +99,7 @@ impl SourceRuntime {
                         )
                         .await,
                     ));
-                    let ytdlp = crate::sources::ytdlp::YtDlp::new(yt_dlp_path);
+                    let ytdlp = crate::sources::ytdlp::YtDlp::new(yt_dlp_path, yt_dlp_args);
                     let in_flight_downloads: InFlightDownloads = Arc::default();
 
                     let mut last_spotify_refresh = std::time::Instant::now();
@@ -415,6 +416,32 @@ async fn handle_request(
                 let _ = event_tx.send(SourceEvent::CoverFetched { url, path });
             }
         }
+        SourceRequest::FetchLyrics { track, query } => {
+            #[cfg(any(feature = "spotify", feature = "youtube"))]
+            let result = match lyrics_http() {
+                Ok(http) => crate::sources::lyrics::find(&http, &query).await,
+                Err(e) => Err(e),
+            };
+            #[cfg(not(any(feature = "spotify", feature = "youtube")))]
+            let result = {
+                let _ = query;
+                Err(NO_ONLINE_LYRICS.to_string())
+            };
+            let _ = event_tx.send(SourceEvent::LyricsFetched { track, result });
+        }
+        SourceRequest::SearchLyrics { track, query, text } => {
+            #[cfg(any(feature = "spotify", feature = "youtube"))]
+            let result = match lyrics_http() {
+                Ok(http) => crate::sources::lyrics::search(&http, &query, text.as_deref()).await,
+                Err(e) => Err(e),
+            };
+            #[cfg(not(any(feature = "spotify", feature = "youtube")))]
+            let result = {
+                let _ = (query, text);
+                Err(NO_ONLINE_LYRICS.to_string())
+            };
+            let _ = event_tx.send(SourceEvent::LyricsMatches { track, result });
+        }
         SourceRequest::DownloadYouTubeTrack {
             video_id,
             generation,
@@ -485,6 +512,17 @@ async fn handle_request(
             }
         }
     }
+}
+
+#[cfg(not(any(feature = "spotify", feature = "youtube")))]
+const NO_ONLINE_LYRICS: &str = "This build has no online lyrics";
+
+#[cfg(any(feature = "spotify", feature = "youtube"))]
+fn lyrics_http() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 async fn fetch_and_cache_cover(url: &str) -> Option<PathBuf> {

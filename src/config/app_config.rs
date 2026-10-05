@@ -28,12 +28,20 @@ pub struct AppConfig {
     /// Custom path to yt-dlp binary (if not on PATH).
     #[serde(default)]
     pub yt_dlp_path: Option<String>,
+    /// Extra arguments passed to yt-dlp on every download, e.g. to enable a
+    /// JavaScript runtime other than its default.
+    #[serde(default)]
+    pub yt_dlp_args: Vec<String>,
     /// Maximum size of the YouTube audio cache in MB (default 512).
     #[serde(default = "default_yt_cache_mb")]
     pub yt_cache_mb: usize,
     /// Preferred YouTube audio quality format (default "bestaudio").
     #[serde(default = "default_yt_audio_quality")]
     pub yt_audio_quality: String,
+    /// Whether lyrics found online for a local track are saved as a `.lrc` file
+    /// next to it. When off they are kept in the cache directory.
+    #[serde(default = "default_true")]
+    pub save_lyrics_next_to_songs: bool,
 }
 
 fn default_true() -> bool {
@@ -61,8 +69,10 @@ impl Default for AppConfig {
             desktop_notifications: true,
             spotify_client_id: None,
             yt_dlp_path: None,
+            yt_dlp_args: Vec::new(),
             yt_cache_mb: 512,
             yt_audio_quality: "bestaudio".to_string(),
+            save_lyrics_next_to_songs: true,
         }
     }
 }

@@ -24,6 +24,28 @@ pub fn parse_duration_str(s: &str) -> Option<u64> {
     }
 }
 
+/// YouTube Music lists tracks with a cover thumbnail of 120 pixels. The image is
+/// served in whatever size its address names, so ask for the size albums are shown in.
+pub fn full_size_cover(url: &str) -> String {
+    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
+    let resized = || {
+        let start = url
+            .rfind("=w")
+            .filter(|_| url.contains("googleusercontent.com"))?;
+        let width = &url[start + 2..];
+        let height = width[digits(width)..].strip_prefix("-h")?;
+        if digits(width) == 0 || digits(height) == 0 {
+            return None;
+        }
+        Some(format!(
+            "{}=w544-h544{}",
+            &url[..start],
+            &height[digits(height)..]
+        ))
+    };
+    resized().unwrap_or_else(|| url.to_string())
+}
+
 #[cfg(feature = "youtube")]
 use ytmapi_rs::auth::noauth::NoAuthToken;
 #[cfg(feature = "youtube")]
@@ -85,25 +107,41 @@ impl YouTubeClient {
         }
     }
 
-    #[allow(deprecated)]
+    /// Search songs, albums and playlists. These are three separate searches:
+    /// YouTube Music's combined search no longer returns anything usable.
     pub async fn search(&self, query: &str) -> Result<Vec<BrowseItem>, String> {
         let Some(ref inner) = self.inner else {
             return Err("YouTube Music client not initialized".to_string());
         };
 
-        let results = match inner {
-            YouTubeClientInner::Authenticated(c) => {
-                c.search(query).await.map_err(|e| e.to_string())?
-            }
-            YouTubeClientInner::Unauthenticated(c) => {
-                c.search(query).await.map_err(|e| e.to_string())?
-            }
+        // Independent requests, so they run together
+        macro_rules! search_all {
+            ($client:expr) => {
+                tokio::join!(
+                    $client.search_songs(query),
+                    $client.search_albums(query),
+                    $client.search_playlists(query),
+                )
+            };
+        }
+        let (songs, albums, playlists) = match inner {
+            YouTubeClientInner::Authenticated(c) => search_all!(c),
+            YouTubeClientInner::Unauthenticated(c) => search_all!(c),
         };
+        if let (Err(e), Err(_), Err(_)) = (&songs, &albums, &playlists) {
+            return Err(e.to_string());
+        }
+        // One kind failing must not hide what the others found
+        fn found<T>(kind: &str, result: Result<Vec<T>, ytmapi_rs::Error>) -> Vec<T> {
+            result.unwrap_or_else(|e| {
+                log::warn!("YouTube {} search failed: {}", kind, e);
+                Vec::new()
+            })
+        }
 
         let mut items = Vec::new();
 
-        // 1. Songs
-        for song in results.songs {
+        for song in found("song", songs) {
             let vid = song.video_id.get_raw().to_string();
             items.push(BrowseItem {
                 id: format!("yt:song:{}", vid),
@@ -114,12 +152,12 @@ impl YouTubeClient {
                 track_ref: Some(TrackRef::YouTube(vid)),
                 duration_secs: parse_duration_str(&song.duration),
                 artwork_url: select_thumbnail(&song.thumbnails),
+                album: song.album.map(|a| a.name).filter(|a| !a.is_empty()),
                 depth: 0,
             });
         }
 
-        // 2. Albums
-        for album in results.albums {
+        for album in found("album", albums) {
             let aid = album.album_id.get_raw().to_string();
             items.push(BrowseItem {
                 id: format!("yt:album:{}", aid),
@@ -130,42 +168,35 @@ impl YouTubeClient {
                 track_ref: None,
                 duration_secs: None,
                 artwork_url: select_thumbnail(&album.thumbnails),
+                album: None,
                 depth: 0,
             });
         }
 
-        // 3. Featured Playlists
-        for pl in results.featured_playlists {
-            let pid = pl.playlist_id.get_raw().to_string();
+        for playlist in found("playlist", playlists) {
+            use ytmapi_rs::parse::SearchResultPlaylist;
+            let (title, author, playlist_id, thumbnails) = match playlist {
+                SearchResultPlaylist::Featured(p) => {
+                    (p.title, p.author, p.playlist_id, p.thumbnails)
+                }
+                SearchResultPlaylist::Community(p) => {
+                    (p.title, p.author, p.playlist_id, p.thumbnails)
+                }
+                // Podcasts are not listed
+                _ => continue,
+            };
             items.push(BrowseItem {
-                id: format!("yt:playlist:{}", pid),
-                title: pl.title,
-                subtitle: Some(format!("Playlist • {}", pl.author)),
+                id: format!("yt:playlist:{}", playlist_id.get_raw()),
+                title,
+                subtitle: Some(format!("Playlist • {}", author)),
                 kind: BrowseItemKind::Playlist,
                 is_container: true,
                 track_ref: None,
                 duration_secs: None,
-                artwork_url: select_thumbnail(&pl.thumbnails),
+                artwork_url: select_thumbnail(&thumbnails),
+                album: None,
                 depth: 0,
             });
-        }
-
-        // 4. Community Playlists
-        for item in results.community_playlists {
-            if let ytmapi_rs::parse::BasicSearchResultCommunityPlaylist::Playlist(pl) = item {
-                let pid = pl.playlist_id.get_raw().to_string();
-                items.push(BrowseItem {
-                    id: format!("yt:playlist:{}", pid),
-                    title: pl.title,
-                    subtitle: Some(format!("Playlist • {}", pl.author)),
-                    kind: BrowseItemKind::Playlist,
-                    is_container: true,
-                    track_ref: None,
-                    duration_secs: None,
-                    artwork_url: select_thumbnail(&pl.thumbnails),
-                    depth: 0,
-                });
-            }
         }
 
         Ok(items)
@@ -183,6 +214,7 @@ impl YouTubeClient {
                     track_ref: None,
                     duration_secs: None,
                     artwork_url: None,
+                    album: None,
                     depth: 0,
                 },
                 BrowseItem {
@@ -194,6 +226,7 @@ impl YouTubeClient {
                     track_ref: None,
                     duration_secs: None,
                     artwork_url: None,
+                    album: None,
                     depth: 0,
                 },
                 BrowseItem {
@@ -205,6 +238,7 @@ impl YouTubeClient {
                     track_ref: None,
                     duration_secs: None,
                     artwork_url: None,
+                    album: None,
                     depth: 0,
                 },
             ]
@@ -218,6 +252,7 @@ impl YouTubeClient {
                 track_ref: None,
                 duration_secs: None,
                 artwork_url: None,
+                album: None,
                 depth: 0,
             }]
         }
@@ -248,6 +283,7 @@ impl YouTubeClient {
                         track_ref: Some(TrackRef::YouTube(vid)),
                         duration_secs: parse_duration_str(&song.duration),
                         artwork_url: select_thumbnail(&song.thumbnails),
+                        album: Some(song.album.name).filter(|a| !a.is_empty()),
                         depth: 0,
                     }
                 })
@@ -272,6 +308,7 @@ impl YouTubeClient {
                         track_ref: None,
                         duration_secs: None,
                         artwork_url: select_thumbnail(&pl.thumbnails),
+                        album: None,
                         depth: 0,
                     }
                 })
@@ -296,6 +333,7 @@ impl YouTubeClient {
                         track_ref: None,
                         duration_secs: None,
                         artwork_url: select_thumbnail(&alb.thumbnails),
+                        album: None,
                         depth: 0,
                     }
                 })
@@ -329,6 +367,7 @@ impl YouTubeClient {
                             track_ref: Some(TrackRef::YouTube(vid)),
                             duration_secs: parse_duration_str(&s.duration),
                             artwork_url: select_thumbnail(&s.thumbnails),
+                            album: Some(s.album.name).filter(|a| !a.is_empty()),
                             depth: 0,
                         });
                     }
@@ -343,6 +382,7 @@ impl YouTubeClient {
                             track_ref: Some(TrackRef::YouTube(vid)),
                             duration_secs: parse_duration_str(&v.duration),
                             artwork_url: select_thumbnail(&v.thumbnails),
+                            album: None,
                             depth: 0,
                         });
                     }
@@ -388,6 +428,7 @@ impl YouTubeClient {
                     track_ref: Some(TrackRef::YouTube(vid)),
                     duration_secs: parse_duration_str(&song.duration),
                     artwork_url: album_cover.clone(),
+                    album: Some(album.title.clone()),
                     depth: 0,
                 });
             }
@@ -432,6 +473,27 @@ impl crate::sources::MusicSource for YouTubeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn covers_are_requested_in_full_size() {
+        assert_eq!(
+            full_size_cover("https://yt3.googleusercontent.com/AbC-d_e=w120-h120-l90-rj"),
+            "https://yt3.googleusercontent.com/AbC-d_e=w544-h544-l90-rj"
+        );
+        assert_eq!(
+            full_size_cover("https://lh3.googleusercontent.com/x=w60-h60"),
+            "https://lh3.googleusercontent.com/x=w544-h544"
+        );
+        // Other addresses, such as video stills and Spotify covers, are left alone
+        for url in [
+            "https://i.ytimg.com/vi/abc/sddefault.jpg?sqp=x&rs=AMzJL3k=w1",
+            "https://i.scdn.co/image/ab67616d0000b273",
+            "https://yt3.googleusercontent.com/x=s120",
+            "https://yt3.googleusercontent.com/x=w-h120",
+        ] {
+            assert_eq!(full_size_cover(url), url);
+        }
+    }
 
     #[test]
     fn test_parse_duration_str() {

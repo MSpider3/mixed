@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::process::Command;
 
@@ -10,15 +11,109 @@ const STREAMABLE_BYTES: u64 = 192 * 1024;
 /// How often the partial file is checked while yt-dlp is running.
 const STREAM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// What yt-dlp prints when YouTube takes the download for a bot's.
+const SIGN_IN_PROMPT: &str = "Sign in to confirm";
+
 /// Wrapper around `yt-dlp` subprocess for streaming audio caching.
 #[derive(Debug, Clone)]
 pub struct YtDlp {
     pub custom_path: Option<String>,
+    /// Arguments from the user's configuration, added to every download.
+    extra_args: Vec<String>,
+    /// Set once YouTube has asked to sign in: from then on downloads carry the
+    /// user's cookie. Until then it stays out of yt-dlp's hands.
+    sign_in_needed: Arc<AtomicBool>,
+}
+
+/// The user's YouTube cookie (a `Cookie` header value) as a Netscape cookie file,
+/// the format yt-dlp reads.
+fn netscape_cookies(header: &str, expires: u64) -> String {
+    let header = header.trim();
+    let header = header
+        .get(..7)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("cookie:"))
+        .map_or(header, |_| &header[7..]);
+    let mut file = String::from("# Netscape HTTP Cookie File\n");
+    for pair in header.split(';') {
+        if let Some((name, value)) = pair.trim().split_once('=') {
+            file.push_str(&format!(
+                ".youtube.com\tTRUE\t/\tTRUE\t{}\t{}\t{}\n",
+                expires, name, value
+            ));
+        }
+    }
+    file
+}
+
+/// Cookie file for yt-dlp made from the user's YouTube cookie, if they set one.
+/// yt-dlp keeps the file up to date itself, so it is named after the cookie and
+/// only written again when the user signs in with another one.
+fn cookie_file() -> Option<PathBuf> {
+    let cookie = crate::config::credentials::Credentials::load()
+        .youtube_cookie
+        .filter(|c| !c.trim().is_empty())?;
+    let dir = crate::config::credentials::credentials_path()
+        .parent()?
+        .to_path_buf();
+    let name = format!("yt_cookies_{}.txt", crate::utils::hash::fnv1a_hex(&cookie));
+    let path = dir.join(&name);
+    if path.exists() {
+        return Some(path);
+    }
+
+    // Files of earlier cookies are of no use any more
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let old = entry.file_name();
+        let old = old.to_string_lossy();
+        if old.starts_with("yt_cookies_") && old.ends_with(".txt") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+
+    let year = 365 * 24 * 60 * 60;
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        + year;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).ok()?;
+    std::io::Write::write_all(&mut file, netscape_cookies(&cookie, expires).as_bytes()).ok()?;
+    Some(path)
+}
+
+/// Turn yt-dlp's error output into a message that says what to do about it.
+fn explain_failure(stderr: &str, signed_in: bool) -> String {
+    if stderr.contains(SIGN_IN_PROMPT) {
+        return if signed_in {
+            "YouTube rejected the saved cookie: sign in again with a fresh one"
+        } else {
+            "YouTube asks to sign in: add your cookie in the YouTube Library tab"
+        }
+        .to_string();
+    }
+    if stderr.contains("challenge solving failed") || stderr.contains("Signature solving failed") {
+        return "yt-dlp needs a JavaScript runtime for YouTube: see docs/youtube.md".to_string();
+    }
+    stderr
+        .lines()
+        .find(|l| l.contains("ERROR:"))
+        .unwrap_or("yt-dlp download failed")
+        .to_string()
 }
 
 impl YtDlp {
-    pub fn new(custom_path: Option<String>) -> Self {
-        Self { custom_path }
+    pub fn new(custom_path: Option<String>, extra_args: Vec<String>) -> Self {
+        Self {
+            custom_path,
+            extra_args,
+            sign_in_needed: Arc::default(),
+        }
     }
 
     /// Check if yt-dlp is available either at custom_path or on PATH.
@@ -108,13 +203,48 @@ impl YtDlp {
         progress: &Arc<DownloadProgress>,
         on_streamable: impl FnOnce(PathBuf),
     ) -> Result<PathBuf, String> {
-        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
-
         if let Some(cached) = Self::find_cached(video_id) {
             return Ok(cached);
         }
 
         self.check_available().await?;
+
+        let cookies = cookie_file();
+        let mut on_streamable = Some(on_streamable);
+        let mut signed_in = self.sign_in_needed.load(Ordering::Relaxed);
+        loop {
+            let jar = cookies.as_deref().filter(|_| signed_in);
+            let Some(stderr) = self
+                .run_once(video_id, format, progress, &mut on_streamable, jar)
+                .await?
+            else {
+                break;
+            };
+            // YouTube asks suspected bots to sign in: try again as the user
+            if stderr.contains(SIGN_IN_PROMPT) && !signed_in && cookies.is_some() {
+                self.sign_in_needed.store(true, Ordering::Relaxed);
+                signed_in = true;
+                continue;
+            }
+            log::warn!("yt-dlp failed for {}: {}", video_id, stderr.trim());
+            return Err(explain_failure(&stderr, signed_in));
+        }
+
+        Self::find_cached(video_id)
+            .ok_or_else(|| "Audio file downloaded but not found in cache".to_string())
+    }
+
+    /// Run yt-dlp once. `Ok(None)` if the download succeeded, otherwise what
+    /// yt-dlp printed about the failure.
+    async fn run_once(
+        &self,
+        video_id: &str,
+        format: &str,
+        progress: &Arc<DownloadProgress>,
+        on_streamable: &mut Option<impl FnOnce(PathBuf)>,
+        cookies: Option<&std::path::Path>,
+    ) -> Result<Option<String>, String> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
         let cache_dir = Self::cache_dir();
         let out_template = cache_dir.join(format!("{}.%(ext)s", video_id));
@@ -136,9 +266,12 @@ impl YtDlp {
             "%(filesize,filesize_approx)s",
             "-o",
             &out_str,
-            "--",
-            video_id,
         ]);
+        if let Some(cookies) = cookies {
+            cmd.arg("--cookies").arg(cookies);
+        }
+        cmd.args(&self.extra_args);
+        cmd.args(["--", video_id]);
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
@@ -169,7 +302,6 @@ impl YtDlp {
         });
 
         // While yt-dlp runs, watch the partial file and report it once it is playable.
-        let mut on_streamable = Some(on_streamable);
         let status = loop {
             match tokio::time::timeout(STREAM_POLL_INTERVAL, child.wait()).await {
                 Ok(status) => break status,
@@ -199,16 +331,7 @@ impl YtDlp {
         };
 
         let status = status.map_err(|e| format!("Failed to run yt-dlp: {}", e))?;
-        if !status.success() {
-            let first_err_line = stderr_text
-                .lines()
-                .find(|l| l.contains("ERROR:"))
-                .unwrap_or("yt-dlp download failed");
-            return Err(first_err_line.to_string());
-        }
-
-        Self::find_cached(video_id)
-            .ok_or_else(|| "Audio file downloaded but not found in cache".to_string())
+        Ok((!status.success()).then_some(stderr_text))
     }
 
     /// Evict oldest cache files until total cache size is under max_mb.
@@ -254,6 +377,44 @@ impl YtDlp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cookie_header_becomes_a_netscape_cookie_file() {
+        let file = netscape_cookies("Cookie: SID=abc; __Secure-1PSID=d=e ;", 1_900_000_000);
+        assert_eq!(
+            file,
+            "# Netscape HTTP Cookie File\n\
+             .youtube.com\tTRUE\t/\tTRUE\t1900000000\tSID\tabc\n\
+             .youtube.com\tTRUE\t/\tTRUE\t1900000000\t__Secure-1PSID\td=e\n"
+        );
+        // Without the header name, as copied from the browser's cookie field
+        assert_eq!(
+            netscape_cookies("SID=abc", 1),
+            netscape_cookies("cookie:SID=abc", 1)
+        );
+    }
+
+    #[test]
+    fn yt_dlp_failures_say_what_to_do() {
+        let bot = "WARNING: [youtube] No supported JavaScript runtime could be found.\n\
+                   ERROR: [youtube] x: Sign in to confirm you\u{2019}re not a bot.";
+        assert!(explain_failure(bot, false).contains("add your cookie"));
+        assert!(explain_failure(bot, true).contains("fresh one"));
+
+        let challenge =
+            "WARNING: [youtube] x: n challenge solving failed: Some formats may be missing.\n\
+                         ERROR: [youtube] x: The page needs to be reloaded.";
+        assert!(explain_failure(challenge, true).contains("JavaScript runtime"));
+
+        // The warning about a missing runtime alone does not explain another error
+        let other = "WARNING: [youtube] No supported JavaScript runtime could be found.\n\
+                     ERROR: [youtube] x: Video unavailable";
+        assert_eq!(
+            explain_failure(other, false),
+            "ERROR: [youtube] x: Video unavailable"
+        );
+        assert_eq!(explain_failure("", false), "yt-dlp download failed");
+    }
 
     #[test]
     fn test_ytdlp_cache_dir_creation() {

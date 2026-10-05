@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Redirected background diagnostics and error outputs cleanly to `~/.cache/mixed/mixed.log`, protecting terminal raw mode from screen corruption.
 
 - **Spotify Streaming & Full Playlist Support**:
-  - Configured `librespot` and OAuth flows to use standard desktop player client ID credentials, resolving `PlayerEvent::Unavailable` playback errors on Spotify streaming.
+  - Playback signs in through `librespot` with Spotify's desktop player client ID, while search and library use a separate Web API client ID (the one ncspot, spotify-player and spotatui share, or your own). Signing in therefore takes two approvals in the browser.
   - Removed arbitrary 500-track cap on Liked Songs and user playlists; implemented full pagination so libraries with thousands of tracks load completely.
   - Isolated test harness credentials to ensure `cargo test` never overwrites or wipes user `credentials.json`.
   - Simplified login flow: users can press `Enter` to sign in directly via browser with no developer account required.
@@ -54,6 +54,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Corrected layout and event routing: decoupled `play_next` from `play_now`, fixed mouse hit-testing offsets, stabilized remote search cursors, and eliminated keyboard freezes on disconnected states.
   - Refined fallback codec selection for `yt-dlp` to ensure native Symphonia decoding support (`m4a`, `mp3`, `aac`).
   - Adjusted error reporting and panic hooks to restore terminal state and output to `stdout` securely.
+- **Lyrics for Every Source** (see `docs/lyrics.md`):
+  - Tracks without lyrics of their own are looked up online when they start: Spotify's own lyrics for Spotify tracks, then [Karalyr](https://www.karalyr.com) (word-synced), then [LRCLIB](https://lrclib.net).
+  - Lyrics found online are saved: as `Song.lrc` next to a local song, and in `~/.cache/mixed/lyrics/` for Spotify and YouTube tracks. `save_lyrics_next_to_songs` in `config.json` turns the first off.
+  - Files written by `mixed` start with `[re:mixed]`. A `.lrc` file without that line is treated as the user's own and is only replaced after confirmation.
+  - Plain (unsynced) lyrics are shown when nothing synced exists, including from a `.lrc` file or embedded tags.
+  - A track for which nothing is found is remembered and not searched again on later plays.
+  - `y` in the Now Playing view opens a list of other lyrics for the playing track, with "search again", "no lyrics" and a search with the user's own words (`/`).
+- **Spotify Sign-In & Metadata**:
+  - Own OAuth callback server: it listens before the browser opens, ignores the browser's favicon and idle connections, gives up after three minutes, and writes the sign-in URL to `mixed.log`.
+  - The Library tab shows which of the two approvals is pending; an approval that already succeeded is not repeated when sign-in is retried.
+  - `c` in the Spotify Library tab signs in with your own Client ID, also while signed in; entering `default` returns to the built-in one.
+  - A rejected playback sign-in is detected during playback and can be renewed from the Library tab without restarting.
+  - Spotify tracks carry their album name and cover art, including tracks opened from an album.
+- **YouTube Downloads Behind Sign-In**:
+  - When YouTube answers a download with "Sign in to confirm you're not a bot", `yt-dlp` is run again with the user's cookie, which is then used for the rest of the session.
+  - New `yt_dlp_args` setting for extra `yt-dlp` arguments, needed to enable a JavaScript runtime (Deno or Node.js) and the challenge solver. `docs/youtube.md` has the exact lines.
+  - YouTube Music tracks carry their album name, and covers are requested at 544 pixels instead of 120.
+- **Diagnostics**:
+  - Log records of `mixed` and `librespot` are now written to `mixed.log`; before, they were discarded.
+  - Failed Spotify requests are logged with Spotify's own explanation, and failed `yt-dlp` runs with everything `yt-dlp` printed.
+
+### Changed
+- **Playback Controls**:
+  - Next (`n` / `l` / `→`) on the last track of the queue leaves it playing. The queue ending by itself still stops.
+  - Play / Pause after a stop starts the current track again.
+- **Spotify**:
+  - A track counts as loaded once its audio starts, so the stop after three failed tracks in a row also applies to Spotify.
+  - A track that fails to load is loaded up to three times before it is skipped.
+  - Playlist contents are fetched 50 tracks per request.
+  - A rate limit is waited out for as long as Spotify asks, up to 30 seconds; longer ones are reported.
+  - The `librespot` audio cache is limited to 1 GB and kept in its own `files` folder.
+- **YouTube Music**:
+  - Search runs separate song, album and playlist searches (up to 20 results each); the combined search no longer returned results.
+- **Dependencies**: `librespot-oauth` is replaced by `oauth2` and `open`.
+- **Help & Docs**: the `F6` help lists the new keys and no longer names `p` as "previous track"; new `docs/lyrics.md`.
+
+### Fixed
+- **Spotify**:
+  - The session was lost about an hour after sign-in, because a token refresh that returned no new refresh token overwrote the stored one.
+  - A track whose decryption key did not arrive in time was reported as "unavailable (regional or format restriction)" and skipped; on a connection that loses packets this skipped whole playlists.
+  - A failed preload of the next track stopped the track that was playing.
+  - One `null` entry in a response made a whole search or library page fail.
+  - Cover art was never requested for Spotify tracks, and the previous track's cover and lyrics stayed on screen.
+  - A failed connection attempt could leave the session unusable until restart.
+- **YouTube Music**:
+  - Downloads failed with "Sign in to confirm you're not a bot" even with a cookie set, because the cookie was not passed to `yt-dlp`.
+  - Search returned nothing or a parse error.
+- **Remote Browsing**: a sign-in that completed while a playlist was open left a stale folder trail above the root list.
 
 ---
 

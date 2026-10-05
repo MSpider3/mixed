@@ -113,6 +113,12 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         }
     }
 
+    // The lyrics picker of the Now Playing view takes every key while it is open
+    if app.lyrics_picker.is_some() && app.active_panel == ActivePanel::NowPlaying {
+        handle_lyrics_picker_key(app, key);
+        return false;
+    }
+
     // If we're in search mode, handle text input
     if app.searching {
         return handle_search_input(app, key);
@@ -168,9 +174,9 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             if app.active_panel == ActivePanel::Library && app.toggle_container_expansion() {
                 return false;
             }
-            app.next_track();
+            app.skip_to_next();
         }
-        KeyCode::Char('n') => app.next_track(),
+        KeyCode::Char('n') => app.skip_to_next(),
         KeyCode::Char('h') | KeyCode::Left => {
             if app.active_panel == ActivePanel::Library && app.navigate_folder_up() {
                 return false;
@@ -213,6 +219,11 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             if app.active_panel == ActivePanel::NowPlaying {
                 app.show_full_lyrics = !app.show_full_lyrics;
                 app.lyrics_scroll = 0;
+            }
+        }
+        KeyCode::Char('y') => {
+            if app.active_panel == ActivePanel::NowPlaying {
+                app.open_lyrics_picker();
             }
         }
 
@@ -281,6 +292,48 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         _ => {}
     }
     false
+}
+
+/// Handle a key while the lyrics picker is open.
+fn handle_lyrics_picker_key(app: &mut App, key: event::KeyEvent) {
+    app.refresh_needed = true;
+    let Some(picker) = app.lyrics_picker.as_mut() else {
+        return;
+    };
+
+    if picker.confirm_replace.is_some() {
+        app.confirm_lyrics_replace(matches!(key.code, KeyCode::Char('y' | 'Y')));
+        return;
+    }
+
+    if let Some(input) = picker.input.as_mut() {
+        match key.code {
+            KeyCode::Esc => picker.input = None,
+            KeyCode::Enter => {
+                let text = picker.input.take().unwrap_or_default();
+                if !text.trim().is_empty() {
+                    app.search_lyrics_matches(Some(text.trim().to_string()));
+                }
+            }
+            KeyCode::Backspace => {
+                input.pop();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                input.push(c);
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc => app.lyrics_picker = None,
+        KeyCode::Up | KeyCode::Char('k') => app.move_lyrics_cursor(false),
+        KeyCode::Down | KeyCode::Char('j') => app.move_lyrics_cursor(true),
+        KeyCode::Enter => app.choose_lyrics(),
+        KeyCode::Char('/') => picker.input = Some(String::new()),
+        _ => {}
+    }
 }
 
 /// Handle text input in search mode. Returns true if app should quit.
@@ -483,6 +536,7 @@ fn scroll_down(app: &mut App) {
                 .current_lyrics
                 .as_ref()
                 .map(|l| l.lines.len())
+                .or_else(|| app.current_plain_lyrics.as_ref().map(Vec::len))
                 .or_else(|| {
                     app.playlist
                         .current_entry()
@@ -781,7 +835,7 @@ pub fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
                     } else if x < indent + 6 {
                         app.toggle_pause();
                     } else if x < indent + 10 {
-                        app.next_track();
+                        app.skip_to_next();
                     } else if x < indent + 14 {
                         app.volume_up();
                     } else if x < indent + 18 {

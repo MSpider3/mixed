@@ -1,4 +1,6 @@
 pub mod local;
+#[cfg(any(feature = "spotify", feature = "youtube"))]
+pub mod lyrics;
 pub mod runtime;
 pub mod spotify;
 #[cfg(feature = "spotify")]
@@ -76,6 +78,8 @@ pub struct BrowseItem {
     pub track_ref: Option<TrackRef>,
     pub duration_secs: Option<u64>,
     pub artwork_url: Option<String>,
+    /// Album a track belongs to, where the source reports it.
+    pub album: Option<String>,
     /// Nesting level in a browse tree: 0 for roots, parent depth + 1 for children.
     pub depth: usize,
 }
@@ -238,6 +242,36 @@ impl SourceView {
     }
 }
 
+/// What lyrics are looked up by.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LyricsQuery {
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub duration_secs: Option<u64>,
+}
+
+/// How closely lyrics follow the music, best last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LyricsSync {
+    Plain,
+    Line,
+    Word,
+}
+
+/// Lyrics a provider offers for a search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LyricsCandidate {
+    pub provider: &'static str,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub duration_secs: Option<u64>,
+    pub sync: LyricsSync,
+    /// LRC text, or plain text for `LyricsSync::Plain`.
+    pub text: String,
+}
+
 /// Requests dispatched to the background async network runtime.
 #[derive(Debug, Clone)]
 pub enum SourceRequest {
@@ -260,6 +294,18 @@ pub enum SourceRequest {
     },
     FetchCover {
         url: String,
+    },
+    /// Find lyrics for a track: the best match of the first provider that has any.
+    FetchLyrics {
+        track: TrackRef,
+        query: Box<LyricsQuery>,
+    },
+    /// List every match, for choosing by hand. `text` replaces the query's title
+    /// and artist with the user's own words.
+    SearchLyrics {
+        track: TrackRef,
+        query: Box<LyricsQuery>,
+        text: Option<String>,
     },
     DownloadYouTubeTrack {
         video_id: String,
@@ -303,6 +349,16 @@ pub enum SourceEvent {
     CoverFetched {
         url: String,
         path: PathBuf,
+    },
+    /// Answer to `FetchLyrics`: `Ok(None)` if no provider has lyrics for the track.
+    LyricsFetched {
+        track: TrackRef,
+        result: Result<Option<LyricsCandidate>, String>,
+    },
+    /// Answer to `SearchLyrics`, best matches first.
+    LyricsMatches {
+        track: TrackRef,
+        result: Result<Vec<LyricsCandidate>, String>,
     },
     /// Enough of a YouTube track has been downloaded to start playing `path`
     /// (the partial file) while the rest arrives.
@@ -350,6 +406,7 @@ mod tests {
             track_ref: None,
             duration_secs: None,
             artwork_url: None,
+            album: None,
             depth: 0,
         }
     }

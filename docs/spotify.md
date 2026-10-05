@@ -17,7 +17,7 @@ No client secret or developer account is required. `mixed` uses the [OAuth 2.0 a
 
 The Library tab shows which of the two steps `mixed` is waiting for. Each one must be approved within three minutes. If one fails, press `Enter` again: a step that already succeeded is not repeated.
 
-Your library (Liked Songs, full Playlists without 500-track limits, and Albums) will immediately appear and songs are ready to stream.
+Your library (Liked Songs, Recently Played, Top Tracks, full Playlists without 500-track limits, and Albums) will immediately appear and songs are ready to stream.
 
 ### (Optional) Using a Personal Developer Client ID
 
@@ -66,10 +66,11 @@ Search and library browsing go through the Web API; audio goes through `librespo
 - **Library (`F3`):** `Enter` on a folder, playlist or album opens it; `Enter` again closes it. `Enter` on a track adds it to the queue (or removes it if it is already queued), `Alt+Enter` plays it now, `Shift+Enter` queues it next.
 - **Search (`F5` or `/`):** results arrive as you type and contain tracks, albums and playlists. Spotify returns at most 10 results of each kind per request.
 - **Queue:** Spotify tracks sit in the same queue as local and YouTube tracks, and are restored with the queue on the next launch.
+- **Album and cover art:** the Now Playing view shows the album name and cover of a Spotify track. Tracks queued by a version of `mixed` from before this was added show `Unknown Album` until they are removed and added again.
 - **Progress and seeking:** elapsed time follows the position reported by Spotify, so it stays at zero while a track is still buffering.
-- **Unavailable tracks:** a track Spotify cannot play is skipped. After three failures in a row, playback stops.
+- **Tracks that fail to load:** a track is loaded up to three times before it is skipped. After three skipped tracks in a row, playback stops.
 - **Not signed in:** playing a queued Spotify track while disconnected stops playback and shows `Spotify not connected. Switch to Spotify (Ctrl+2/Alt+2) to log in.` The track stays in the queue.
-- **Lyrics:** not available for Spotify tracks (local files only).
+- **Lyrics:** Spotify's own lyrics are shown when it has them, otherwise lyrics from other services. See [Lyrics](lyrics.md).
 
 Podcast episodes and local files inside a Spotify playlist are not listed.
 
@@ -78,6 +79,7 @@ Podcast episodes and local files inside a Spotify playlist are not listed.
 - **The browser shows "INVALID_CLIENT: Invalid redirect URI":** the Redirect URI in your Spotify app does not match `http://127.0.0.1:8898/login` exactly.
 - **Sign-in never completes:** make sure nothing else is using port `8989` (`8898` with your own Client ID), then press `Enter` in the Library tab to try again. If no browser opens, copy the `Spotify sign-in URL` line from `mixed.log` into a browser on the same machine.
 - **`Spotify is rate limiting requests. Try again in N s.`:** Spotify is rate-limiting the Client ID, which for the built-in one is shared with other players. Waits of up to 30 seconds are handled automatically; longer ones are reported like this.
+- **`Spotify could not load the track (unavailable, or the connection to Spotify timed out)`:** either the track is not playable for your account or region, or Spotify's audio servers did not answer in time. `librespot` waits only 1.5 seconds for a track's decryption key, so a connection that loses packets on the way to those servers causes this even when browsing works. `mixed.log` tells the two apart: `Audio key response timeout` means the connection.
 - **Signed in before but now "Not connected":** the saved tokens were rejected. Sign in again from the Library tab.
 - **Changing the Client ID:** press `c` in the Library tab and sign in with the new one; the old tokens no longer apply.
 - **`Playback sign-in is no longer valid`:** Spotify rejected the stored playback login. Press `Enter` in the Library tab; only the playback approval is repeated.

@@ -75,9 +75,18 @@ impl Sink for LibrespotPcmSink {
     }
 }
 
+/// How often a track is loaded before it is reported as failed. On a connection
+/// that loses packets, librespot's request for the decryption key often times out
+/// (it waits 1.5 s), and asking again usually succeeds.
+#[cfg(feature = "spotify")]
+const MAX_LOAD_ATTEMPTS: u32 = 3;
+
 /// How long a single Spotify access-point login may take before the load fails.
 #[cfg(feature = "spotify")]
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// A track URI and the lyrics Spotify has for it, if any.
+pub type LyricsAnswer = (String, Option<String>);
 
 pub struct SpotifyBackend {
     #[cfg(feature = "spotify")]
@@ -102,6 +111,14 @@ pub struct SpotifyBackend {
     /// Currently loaded track URI, guarding against race conditions in EndOfTrack.
     #[cfg(feature = "spotify")]
     active_track: Arc<Mutex<Option<SpotifyUri>>>,
+    /// Loads of the active track so far, and the position they start from.
+    #[cfg(feature = "spotify")]
+    load_attempts: u32,
+    #[cfg(feature = "spotify")]
+    start_position_ms: u32,
+    /// Answers to `fetch_lyrics`, not yet consumed: track URI and its lyrics, if any.
+    #[cfg(feature = "spotify")]
+    lyrics: Arc<Mutex<Vec<LyricsAnswer>>>,
     pcm_source: Option<PcmSource>,
 }
 
@@ -164,6 +181,35 @@ pub async fn store_credentials(access_token: &str) -> Result<(), String> {
     }
 }
 
+/// How long Spotify may take to answer a lyrics request.
+#[cfg(feature = "spotify")]
+const LYRICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Convert the answer of Spotify's lyrics service to LRC text, or to plain text
+/// if the lyrics are not synced. `None` if it holds no lyrics.
+#[cfg(feature = "spotify")]
+fn lrc_from_spotify(json: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let lyrics = value.get("lyrics")?;
+    let synced = lyrics.get("syncType")?.as_str()? == "LINE_SYNCED";
+    let mut text = String::new();
+    for line in lyrics.get("lines")?.as_array()? {
+        let words = line.get("words")?.as_str()?;
+        if synced {
+            let ms: u64 = line.get("startTimeMs")?.as_str()?.parse().ok()?;
+            text.push_str(&format!(
+                "[{:02}:{:02}.{:02}]",
+                ms / 60_000,
+                ms / 1000 % 60,
+                ms / 10 % 100
+            ));
+        }
+        text.push_str(words);
+        text.push('\n');
+    }
+    (!text.trim().is_empty()).then_some(text)
+}
+
 /// Build a librespot session and player bound to `rt`, plus the task that maps
 /// librespot player events onto the PCM writer and the failure slot.
 #[cfg(feature = "spotify")]
@@ -207,14 +253,17 @@ fn build_session_and_player(
     let mut events = player.get_player_event_channel();
     rt.spawn(async move {
         use librespot_playback::player::PlayerEvent;
+        let is_active = |track_id: &SpotifyUri| {
+            active_track_for_events
+                .lock()
+                .is_ok_and(|cur| cur.as_ref() == Some(track_id))
+        };
         while let Some(event) = events.recv().await {
             match event {
                 PlayerEvent::EndOfTrack { track_id, .. } => {
-                    if let Ok(cur) = active_track_for_events.lock() {
-                        if cur.as_ref() != Some(&track_id) {
-                            log::debug!("Ignoring EndOfTrack for non-active track {:?}", track_id);
-                            continue;
-                        }
+                    if !is_active(&track_id) {
+                        log::debug!("Ignoring EndOfTrack for non-active track {:?}", track_id);
+                        continue;
                     }
                     if let Ok(w) = writer_for_events.lock() {
                         w.set_ended(true);
@@ -222,19 +271,44 @@ fn build_session_and_player(
                 }
                 // Audio starts (or resumes, or jumps, or advances) at this position: the UI clock
                 // is synchronised to it instead of running from the load request.
-                PlayerEvent::Playing { position_ms, .. }
-                | PlayerEvent::Seeked { position_ms, .. }
-                | PlayerEvent::PositionCorrection { position_ms, .. }
-                | PlayerEvent::PositionChanged { position_ms, .. } => {
-                    if let Ok(mut p) = position_for_events.lock() {
-                        *p = Some(u64::from(position_ms));
+                PlayerEvent::Playing {
+                    track_id,
+                    position_ms,
+                    ..
+                }
+                | PlayerEvent::Seeked {
+                    track_id,
+                    position_ms,
+                    ..
+                }
+                | PlayerEvent::PositionCorrection {
+                    track_id,
+                    position_ms,
+                    ..
+                }
+                | PlayerEvent::PositionChanged {
+                    track_id,
+                    position_ms,
+                    ..
+                } => {
+                    // A late report of the previous track says nothing about this one
+                    if is_active(&track_id) {
+                        if let Ok(mut p) = position_for_events.lock() {
+                            *p = Some(u64::from(position_ms));
+                        }
                     }
                 }
                 PlayerEvent::Unavailable { track_id, .. } => {
-                    log::warn!("Spotify player reported track unavailable: {:?}", track_id);
+                    // Also sent when preloading the next track fails, which must not
+                    // end the track that is playing: it is loaded again when its turn comes.
+                    if !is_active(&track_id) {
+                        log::debug!("Ignoring failed preload of {:?}", track_id);
+                        continue;
+                    }
+                    log::warn!("Spotify player could not load track {:?}", track_id);
                     if let Ok(mut f) = failure_for_events.lock() {
                         *f = Some(
-                            "Track is unavailable on Spotify (regional or format restriction)"
+                            "Spotify could not load the track (unavailable, or the connection to Spotify timed out)"
                                 .to_string(),
                         );
                     }
@@ -298,6 +372,9 @@ impl SpotifyBackend {
                 writer_holder,
                 stopped,
                 connected: false,
+                load_attempts: 0,
+                start_position_ms: 0,
+                lyrics: Arc::default(),
                 failure,
                 position,
                 active_track,
@@ -388,11 +465,26 @@ impl SpotifyBackend {
         }
     }
 
-    /// Take the pending playback failure reported by librespot, if any.
+    /// Take the pending playback failure reported by librespot, if any. A track
+    /// that failed to load is first loaded again, up to `MAX_LOAD_ATTEMPTS` times.
     pub fn take_failure(&mut self) -> Option<String> {
         #[cfg(feature = "spotify")]
         {
-            self.failure.lock().ok().and_then(|mut f| f.take())
+            let failure = self.failure.lock().ok().and_then(|mut f| f.take())?;
+            let track = self.active_track.lock().ok().and_then(|cur| cur.clone());
+            if let (Some(player), Some(track)) = (self.player.as_ref(), track) {
+                if self.load_attempts < MAX_LOAD_ATTEMPTS {
+                    self.load_attempts += 1;
+                    log::warn!(
+                        "Loading Spotify track again (attempt {} of {})",
+                        self.load_attempts,
+                        MAX_LOAD_ATTEMPTS
+                    );
+                    player.load(track, true, self.start_position_ms);
+                    return None;
+                }
+            }
+            Some(failure)
         }
         #[cfg(not(feature = "spotify"))]
         {
@@ -433,6 +525,64 @@ impl SpotifyBackend {
             #[cfg(not(feature = "spotify"))]
             let _ = writer;
             source
+        }
+    }
+
+    /// Ask Spotify for the lyrics of a track. The answer is picked up with `take_lyrics`
+    /// and holds no lyrics if Spotify has none or cannot be asked.
+    pub fn fetch_lyrics(&self, uri: &str) {
+        #[cfg(feature = "spotify")]
+        {
+            let answers = self.lyrics.clone();
+            let uri = uri.to_string();
+            let answer = move |uri: String, lyrics: Option<String>| {
+                if let Ok(mut answers) = answers.lock() {
+                    answers.push((uri, lyrics));
+                }
+            };
+
+            let session = self.session.clone().filter(|_| self.connected);
+            let id = SpotifyUri::from_uri(&uri)
+                .ok()
+                .and_then(|u| librespot_core::SpotifyId::try_from(&u).ok());
+            let (Some(rt), Some(session), Some(id)) = (self.rt.as_ref(), session, id) else {
+                answer(uri, None);
+                return;
+            };
+            rt.spawn(async move {
+                let request = session.spclient().get_lyrics(&id);
+                let lyrics = match tokio::time::timeout(LYRICS_TIMEOUT, request).await {
+                    Ok(Ok(json)) => lrc_from_spotify(&json),
+                    Ok(Err(e)) => {
+                        log::debug!("No Spotify lyrics for {}: {}", uri, e);
+                        None
+                    }
+                    Err(_) => {
+                        log::warn!("Spotify lyrics request for {} timed out", uri);
+                        None
+                    }
+                };
+                answer(uri, lyrics);
+            });
+        }
+        #[cfg(not(feature = "spotify"))]
+        {
+            let _ = uri;
+        }
+    }
+
+    /// Take the answers to `fetch_lyrics` that have arrived: track URI and lyrics.
+    pub fn take_lyrics(&mut self) -> Vec<LyricsAnswer> {
+        #[cfg(feature = "spotify")]
+        {
+            self.lyrics
+                .lock()
+                .map(|mut answers| std::mem::take(&mut *answers))
+                .unwrap_or_default()
+        }
+        #[cfg(not(feature = "spotify"))]
+        {
+            Vec::new()
         }
     }
 
@@ -486,6 +636,9 @@ impl SpotifyBackend {
             if let Ok(mut cur) = self.active_track.lock() {
                 *cur = Some(track_uri.clone());
             }
+
+            self.load_attempts = 1;
+            self.start_position_ms = position_ms;
 
             let Some(ref player) = self.player else {
                 return Err("Spotify player not initialized".into());
@@ -544,5 +697,31 @@ impl SpotifyBackend {
                 player.stop();
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "spotify"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spotify_lyrics_become_lrc_or_plain_text() {
+        let synced = br#"{"lyrics":{"syncType":"LINE_SYNCED","lines":[
+            {"startTimeMs":"12650","words":"first","syllables":[],"endTimeMs":"0"},
+            {"startTimeMs":"83370","words":"second","syllables":[],"endTimeMs":"0"}]}}"#;
+        assert_eq!(
+            lrc_from_spotify(synced).as_deref(),
+            Some("[00:12.65]first\n[01:23.37]second\n")
+        );
+
+        let unsynced = br#"{"lyrics":{"syncType":"UNSYNCED","lines":[
+            {"startTimeMs":"0","words":"just words"}]}}"#;
+        assert_eq!(lrc_from_spotify(unsynced).as_deref(), Some("just words\n"));
+
+        assert_eq!(
+            lrc_from_spotify(br#"{"lyrics":{"syncType":"UNSYNCED","lines":[]}}"#),
+            None
+        );
+        assert_eq!(lrc_from_spotify(b"not json"), None);
     }
 }

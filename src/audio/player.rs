@@ -53,6 +53,11 @@ pub enum PlayerEvent {
     },
     /// Spotify rejected the stored playback sign-in; the user has to sign in again.
     SpotifySignInLost,
+    /// Answer to `Player::fetch_spotify_lyrics`: LRC or plain text, if Spotify has lyrics.
+    SpotifyLyrics {
+        uri: String,
+        lyrics: Option<String>,
+    },
 }
 
 /// Commands sent to the background player thread.
@@ -69,6 +74,7 @@ pub enum PlayerCmd {
     Stop,
     SetVolume(u8),
     PreloadSpotify(String),
+    FetchSpotifyLyrics(String),
 }
 
 /// Unified audio backend router.
@@ -200,6 +206,9 @@ impl Player {
             let mut spotify_backend = crate::audio::spotify_backend::SpotifyBackend::new();
             // librespot is only driven while the loaded track is a Spotify stream.
             let mut current_is_spotify = false;
+            // A Spotify track counts as loaded once librespot reports its position,
+            // i.e. once its audio really starts; until then it can still fail.
+            let mut spotify_start_pending = false;
 
             loop {
                 // Poll commands; recv_timeout keeps real-time constraints
@@ -266,8 +275,7 @@ impl Player {
                                                 is_paused_clone.store(false, Ordering::Release);
                                                 is_playing_clone.store(true, Ordering::Release);
                                                 is_finished_clone.store(false, Ordering::Release);
-                                                let _ = event_tx
-                                                    .send(PlayerEvent::Loaded { generation });
+                                                spotify_start_pending = true;
                                             }
                                             Err(e) => {
                                                 is_playing_clone.store(false, Ordering::Release);
@@ -334,6 +342,9 @@ impl Player {
                             spotify_backend.preload(&uri);
                         }
                     }
+                    Ok(PlayerCmd::FetchSpotifyLyrics(uri)) => {
+                        spotify_backend.fetch_lyrics(&uri);
+                    }
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                         break;
                     }
@@ -355,10 +366,20 @@ impl Player {
                     }
                 }
 
+                for (uri, lyrics) in spotify_backend.take_lyrics() {
+                    let _ = event_tx.send(PlayerEvent::SpotifyLyrics { uri, lyrics });
+                }
+
                 // Align the clock with the position librespot is actually playing
                 if let Some(pos_ms) = spotify_backend.take_position_ms() {
                     if current_is_spotify {
                         backend.sync_position(pos_ms);
+                        if spotify_start_pending {
+                            spotify_start_pending = false;
+                            let _ = event_tx.send(PlayerEvent::Loaded {
+                                generation: current_generation,
+                            });
+                        }
                     }
                 }
 
@@ -555,5 +576,11 @@ impl Player {
 
     pub fn preload_spotify(&self, uri: String) {
         let _ = self.cmd_tx.send(PlayerCmd::PreloadSpotify(uri));
+    }
+
+    /// Ask Spotify for a track's lyrics; answered with `PlayerEvent::SpotifyLyrics`.
+    /// Works once a Spotify track has been loaded, which connects the session.
+    pub fn fetch_spotify_lyrics(&self, uri: String) {
+        let _ = self.cmd_tx.send(PlayerCmd::FetchSpotifyLyrics(uri));
     }
 }

@@ -18,6 +18,7 @@ pub fn entry_to_browse(entry: &LibraryEntry) -> BrowseItem {
             track_ref: Some(TrackRef::Local(path.clone())),
             duration_secs: metadata.duration.map(|d| d.as_secs()),
             artwork_url: None,
+            album: None,
             depth: 0,
         },
         LibraryEntry::Directory { name, path, .. } => BrowseItem {
@@ -29,6 +30,7 @@ pub fn entry_to_browse(entry: &LibraryEntry) -> BrowseItem {
             track_ref: None,
             duration_secs: None,
             artwork_url: None,
+            album: None,
             depth: 0,
         },
     }

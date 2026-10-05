@@ -132,6 +132,26 @@ fn best_image(images: Option<&[SpotifyImage]>) -> Option<String> {
         .map(|img| img.url.clone())
 }
 
+/// A track as a browse item. `album` is the album of tracks that are listed without
+/// one (the tracks of an album).
+#[cfg(feature = "spotify")]
+fn track_item(track: SpotifyTrack, album: Option<&SpotifyAlbumSimple>) -> BrowseItem {
+    let album = track.album.as_ref().or(album);
+    let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
+    BrowseItem {
+        id: format!("spotify:track:{}", track.id),
+        title: track.name,
+        subtitle: Some(artists.join(", ")),
+        kind: BrowseItemKind::Track,
+        is_container: false,
+        track_ref: Some(TrackRef::Spotify(track.uri)),
+        duration_secs: Some(track.duration_ms / 1000),
+        artwork_url: album.and_then(|a| best_image(a.images.as_deref())),
+        album: album.map(|a| a.name.clone()),
+        depth: 0,
+    }
+}
+
 #[cfg(feature = "spotify")]
 pub struct SpotifyClient {
     client_id: Option<String>,
@@ -460,24 +480,13 @@ impl SpotifyClient {
 
         // 1. Tracks
         if let Some(tracks) = search_data.tracks {
-            for track in tracks.items.into_iter().flatten() {
-                let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
-                let cover = track
-                    .album
-                    .as_ref()
-                    .and_then(|alb| best_image(alb.images.as_deref()));
-                items.push(BrowseItem {
-                    id: format!("spotify:track:{}", track.id),
-                    title: track.name,
-                    subtitle: Some(artists.join(", ")),
-                    kind: BrowseItemKind::Track,
-                    is_container: false,
-                    track_ref: Some(TrackRef::Spotify(track.uri)),
-                    duration_secs: Some(track.duration_ms / 1000),
-                    artwork_url: cover,
-                    depth: 0,
-                });
-            }
+            items.extend(
+                tracks
+                    .items
+                    .into_iter()
+                    .flatten()
+                    .map(|track| track_item(track, None)),
+            );
         }
 
         // 2. Albums
@@ -503,6 +512,7 @@ impl SpotifyClient {
                     track_ref: None,
                     duration_secs: None,
                     artwork_url: best_image(album.images.as_deref()),
+                    album: None,
                     depth: 0,
                 });
             }
@@ -524,6 +534,7 @@ impl SpotifyClient {
                     track_ref: None,
                     duration_secs: None,
                     artwork_url: best_image(pl.images.as_deref()),
+                    album: None,
                     depth: 0,
                 });
             }
@@ -544,6 +555,7 @@ impl SpotifyClient {
                     track_ref: None,
                     duration_secs: None,
                     artwork_url: None,
+                    album: None,
                     depth: 0,
                 },
                 BrowseItem {
@@ -555,6 +567,7 @@ impl SpotifyClient {
                     track_ref: None,
                     duration_secs: None,
                     artwork_url: None,
+                    album: None,
                     depth: 0,
                 },
                 BrowseItem {
@@ -566,6 +579,7 @@ impl SpotifyClient {
                     track_ref: None,
                     duration_secs: None,
                     artwork_url: None,
+                    album: None,
                     depth: 0,
                 },
                 BrowseItem {
@@ -577,6 +591,7 @@ impl SpotifyClient {
                     track_ref: None,
                     duration_secs: None,
                     artwork_url: None,
+                    album: None,
                     depth: 0,
                 },
                 BrowseItem {
@@ -588,6 +603,7 @@ impl SpotifyClient {
                     track_ref: None,
                     duration_secs: None,
                     artwork_url: None,
+                    album: None,
                     depth: 0,
                 },
             ]
@@ -601,6 +617,7 @@ impl SpotifyClient {
                 track_ref: None,
                 duration_secs: None,
                 artwork_url: None,
+                album: None,
                 depth: 0,
             }]
         }
@@ -623,25 +640,7 @@ impl SpotifyClient {
             let items: Vec<_> = data
                 .items
                 .into_iter()
-                .map(|item| {
-                    let track = item.track;
-                    let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
-                    let cover = track
-                        .album
-                        .as_ref()
-                        .and_then(|alb| best_image(alb.images.as_deref()));
-                    BrowseItem {
-                        id: format!("spotify:track:{}", track.id),
-                        title: track.name,
-                        subtitle: Some(artists.join(", ")),
-                        kind: BrowseItemKind::Track,
-                        is_container: false,
-                        track_ref: Some(TrackRef::Spotify(track.uri)),
-                        duration_secs: Some(track.duration_ms / 1000),
-                        artwork_url: cover,
-                        depth: 0,
-                    }
-                })
+                .map(|item| track_item(item.track, None))
                 .collect();
             let _ = event_tx.send(SourceEvent::Children {
                 source,
@@ -664,24 +663,7 @@ impl SpotifyClient {
                 .items
                 .into_iter()
                 .flatten()
-                .map(|track| {
-                    let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
-                    let cover = track
-                        .album
-                        .as_ref()
-                        .and_then(|alb| best_image(alb.images.as_deref()));
-                    BrowseItem {
-                        id: format!("spotify:track:{}", track.id),
-                        title: track.name,
-                        subtitle: Some(artists.join(", ")),
-                        kind: BrowseItemKind::Track,
-                        is_container: false,
-                        track_ref: Some(TrackRef::Spotify(track.uri)),
-                        duration_secs: Some(track.duration_ms / 1000),
-                        artwork_url: cover,
-                        depth: 0,
-                    }
-                })
+                .map(|track| track_item(track, None))
                 .collect();
             let _ = event_tx.send(SourceEvent::Children {
                 source,
@@ -715,26 +697,7 @@ impl SpotifyClient {
                     .items
                     .into_iter()
                     .flatten()
-                    .map(|item| {
-                        let track = item.track;
-                        let artists: Vec<String> =
-                            track.artists.into_iter().map(|a| a.name).collect();
-                        let cover = track
-                            .album
-                            .as_ref()
-                            .and_then(|alb| best_image(alb.images.as_deref()));
-                        BrowseItem {
-                            id: format!("spotify:track:{}", track.id),
-                            title: track.name,
-                            subtitle: Some(artists.join(", ")),
-                            kind: BrowseItemKind::Track,
-                            is_container: false,
-                            track_ref: Some(TrackRef::Spotify(track.uri)),
-                            duration_secs: Some(track.duration_ms / 1000),
-                            artwork_url: cover,
-                            depth: 0,
-                        }
-                    })
+                    .map(|item| track_item(item.track, None))
                     .collect();
 
                 let is_last = raw_len < 50 || total.is_some_and(|t| current_offset + raw_len >= t);
@@ -791,6 +754,7 @@ impl SpotifyClient {
                             track_ref: None,
                             duration_secs: None,
                             artwork_url: best_image(pl.images.as_deref()),
+                            album: None,
                             depth: 0,
                         }
                     })
@@ -853,6 +817,7 @@ impl SpotifyClient {
                             track_ref: None,
                             duration_secs: None,
                             artwork_url: best_image(album.images.as_deref()),
+                            album: None,
                             depth: 0,
                         }
                     })
@@ -899,25 +864,7 @@ impl SpotifyClient {
                     .into_iter()
                     .flatten()
                     .filter_map(SpotifyPlaylistTrackItem::into_track)
-                    .map(|track| {
-                        let artists: Vec<String> =
-                            track.artists.into_iter().map(|a| a.name).collect();
-                        let cover = track
-                            .album
-                            .as_ref()
-                            .and_then(|alb| best_image(alb.images.as_deref()));
-                        BrowseItem {
-                            id: format!("spotify:track:{}", track.id),
-                            title: track.name,
-                            subtitle: Some(artists.join(", ")),
-                            kind: BrowseItemKind::Track,
-                            is_container: false,
-                            track_ref: Some(TrackRef::Spotify(track.uri)),
-                            duration_secs: Some(track.duration_ms / 1000),
-                            artwork_url: cover,
-                            depth: 0,
-                        }
-                    })
+                    .map(|track| track_item(track, None))
                     .collect();
 
                 let is_last = raw_len < 50 || total.is_some_and(|t| current_offset + raw_len >= t);
@@ -939,6 +886,14 @@ impl SpotifyClient {
         }
 
         if let Some(aid) = parent_id.strip_prefix("spotify:album:") {
+            // An album's tracks are listed without the album: fetch it for its name and cover
+            let album = self
+                .get(&format!("https://api.spotify.com/v1/albums/{}", aid))
+                .await?
+                .json::<SpotifyAlbumSimple>()
+                .await
+                .map_err(|e| e.to_string())?;
+
             let mut current_offset = 0;
             let mut page_idx = 0;
             loop {
@@ -960,21 +915,7 @@ impl SpotifyClient {
                     .items
                     .into_iter()
                     .flatten()
-                    .map(|track| {
-                        let artists: Vec<String> =
-                            track.artists.into_iter().map(|a| a.name).collect();
-                        BrowseItem {
-                            id: format!("spotify:track:{}", track.id),
-                            title: track.name,
-                            subtitle: Some(artists.join(", ")),
-                            kind: BrowseItemKind::Track,
-                            is_container: false,
-                            track_ref: Some(TrackRef::Spotify(track.uri)),
-                            duration_secs: Some(track.duration_ms / 1000),
-                            artwork_url: None,
-                            depth: 0,
-                        }
-                    })
+                    .map(|track| track_item(track, Some(&album)))
                     .collect();
 
                 let is_last = raw_len < 50 || total.is_some_and(|t| current_offset + raw_len >= t);
@@ -1118,6 +1059,32 @@ mod tests {
             describe_api_error(status, "<html>"),
             "Spotify API error: HTTP 403 Forbidden"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "spotify")]
+    fn track_items_carry_album_and_cover() {
+        let album_json = r#"{"id":"a1","name":"The Album","images":[{"url":"small","width":64},{"url":"big","width":640}]}"#;
+        let track_json = |album: &str| {
+            format!(
+                r#"{{"id":"t1","name":"Song","uri":"spotify:track:t1","duration_ms":61000,"artists":[{{"name":"A"}},{{"name":"B"}}]{}}}"#,
+                album
+            )
+        };
+
+        let full: SpotifyTrack =
+            serde_json::from_str(&track_json(&format!(r#","album":{}"#, album_json))).unwrap();
+        let item = track_item(full, None);
+        assert_eq!(item.subtitle.as_deref(), Some("A, B"));
+        assert_eq!(item.album.as_deref(), Some("The Album"));
+        assert_eq!(item.artwork_url.as_deref(), Some("big"));
+
+        // The tracks of an album come without it and take it from the album itself
+        let bare: SpotifyTrack = serde_json::from_str(&track_json("")).unwrap();
+        let album: SpotifyAlbumSimple = serde_json::from_str(album_json).unwrap();
+        let item = track_item(bare, Some(&album));
+        assert_eq!(item.album.as_deref(), Some("The Album"));
+        assert_eq!(item.artwork_url.as_deref(), Some("big"));
     }
 
     #[test]

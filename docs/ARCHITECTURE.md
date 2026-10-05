@@ -196,15 +196,17 @@ A dedicated multi-threaded **Tokio** runtime that handles all asynchronous netwo
 
 **Streaming integrations:**
 - **Spotify (`sources/spotify.rs`):**
-  - Web API client over `reqwest`: `/search` (10 results per type per page), `/me/tracks`, `/me/playlists`, `/me/albums`, `/playlists/{id}/items`, `/albums/{id}/tracks`. A rate-limited search (HTTP 429) is retried once after `Retry-After`.
-  - PKCE login through `librespot-oauth` with redirect `http://127.0.0.1:8898/login`. The access token is refreshed at startup and before a request once it is older than 45 minutes; refreshed tokens are written back to `credentials.json`.
+  - Web API client over `reqwest`: `/search` (10 results per type per page), `/me/tracks`, `/me/playlists`, `/me/albums`, `/playlists/{id}/items`, `/albums/{id}/tracks`. A rate-limited request (HTTP 429) is repeated after `Retry-After` when that is at most 30 seconds.
+  - PKCE login (`sources/spotify_oauth.rs`, built on `oauth2`) with its own callback server. Two sign-ins are made: one for the Web API with the shared client ID (redirect `http://127.0.0.1:8989/login`) or the user's own (`http://127.0.0.1:8898/login`), and one with Spotify's desktop client ID, whose token `librespot` exchanges for the reusable playback login in its cache. The Web API access token is refreshed at startup and before a request once it is older than 45 minutes; refreshed tokens are written back to `credentials.json`.
   - Audio does not pass through this thread; see *Spotify playback* under Thread 2.
 - **YouTube Music (`sources/youtube.rs` & `sources/ytdlp.rs`):**
-  - Searches and browses YouTube Music via `ytmapi-rs`, authenticated with a browser cookie or anonymously (search only).
+  - Searches and browses YouTube Music via `ytmapi-rs`, authenticated with a browser cookie or anonymously (search only). Search runs the song, album and playlist searches side by side.
+  - When `yt-dlp` reports that YouTube asks to sign in, it is run again with the cookie, written as a Netscape cookie file next to `credentials.json`. `yt_dlp_args` from `config.json` are added to every run.
   - Spawns background `yt-dlp` processes that download audio into `~/.cache/mixed/yt/` (`--fixup never`, so a file is never rewritten while it plays). `yt-dlp` prints the expected file size, which is stored in the download's `DownloadProgress`.
   - While `yt-dlp` runs, the partial `.part` file is polled; once it holds about 190 KB a `YouTubeTrackStreamable` event lets the app start playback from it. `YouTubeTrackDownloaded` / `YouTubeDownloadFailed` follow when the process exits. If the partial file cannot be decoded, the app waits for the completed file instead.
   - Downloads in flight are tracked by video id, so a prefetch and a play request for the same track share one process.
   - The cache is trimmed oldest-first to `yt_cache_mb` at startup and after each download. When the current track passes 50%, the next YouTube track in the queue is prefetched.
+- **Lyrics (`sources/lyrics.rs`):** `FetchLyrics` asks the LRCLIB-compatible providers (Karalyr, then LRCLIB) for a track's lyrics and `SearchLyrics` lists every match for the picker. Spotify's own lyrics come from the playback session instead (`SpotifyBackend::fetch_lyrics`, answered with `PlayerEvent::SpotifyLyrics`). Finding, saving and choosing lyrics is driven by `app/track_lyrics.rs`; `data/lyrics_store.rs` decides where they are kept.
 - **Cover art:** `FetchCover` downloads remote artwork into the `covers` cache folder; the cached file feeds the same image pipeline as embedded local covers.
 
 **Remote browse state (`sources/mod.rs`):** each remote source has a `SourceView` holding its library tree (`flat`), search results, cursors and login prompt. `BrowseItem.depth` records nesting; `SourceView::expand` splices a container's children below it and `collapse` removes the whole subtree.
@@ -277,6 +279,8 @@ This design ensures the main thread can read player state at any time without ev
 src/
 ├── main.rs              # Thread 1: Event loop, terminal setup, select! multiplexer
 ├── app.rs               # Central App state, tick logic, player/source event handling, FFT thread spawn (Thread 3)
+├── app/
+│   └── track_lyrics.rs  # Lyrics of the playing track: lookup, saving, the "other lyrics" picker
 ├── cli.rs               # Command-line parsing and --help text
 ├── audio/
 │   ├── player.rs        # Thread 2: command loop, PlayInput/PlayerCmd/PlayerEvent, atomic state
@@ -291,7 +295,9 @@ src/
 │   ├── mod.rs           # SourceTab, BrowseItem, SourceView (browse tree), Request/Event enums
 │   ├── runtime.rs       # Async Tokio runtime, request handling, in-flight download tracking
 │   ├── local.rs         # Local library adapter to BrowseItem
-│   ├── spotify.rs       # Spotify Web API client, PKCE login, token refresh
+│   ├── lyrics.rs        # Lyrics providers (Karalyr, LRCLIB)
+│   ├── spotify.rs       # Spotify Web API client, two-step sign-in, token refresh
+│   ├── spotify_oauth.rs # OAuth 2.0 PKCE flow with a local callback server
 │   ├── youtube.rs       # YouTube Music search and browse client
 │   └── ytdlp.rs         # yt-dlp runner, partial-file detection, cache eviction
 ├── sys/
@@ -308,6 +314,6 @@ src/
 │   ├── visualizer_widget.rs # Bar/braille spectrum widget
 │   └── lyrics_widget.rs # Synchronized lyrics display
 ├── config/              # AppConfig (config.json), SessionState (state.json), Credentials (credentials.json)
-├── data/                # TrackRef, Playlist (the single queue), Library, Metadata, Lyrics
+├── data/                # TrackRef, Playlist (the single queue), Library, Metadata, Lyrics (parsing and storage)
 └── utils/               # Stable FNV-1a hash for cache names, terminal-title sanitizer
 ```

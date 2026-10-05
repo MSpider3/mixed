@@ -8,13 +8,16 @@ use crate::audio::visualizer::VisualizerMode;
 use crate::config::app_config::AppConfig;
 use crate::config::session::{self, SessionState};
 use crate::data::library::{self, LibraryEntry};
-use crate::data::lyrics::{self, LyricsData};
+use crate::data::lyrics::LyricsData;
 use crate::data::metadata::{self, TrackMetadata};
 use crate::data::playlist::{Playlist, RepeatMode};
 use crate::data::track::TrackRef;
 #[cfg(target_os = "linux")]
 use crate::sys::mpris::{self, SharedMprisState};
 use crate::sys::MediaCommand;
+
+mod track_lyrics;
+pub use track_lyrics::{LyricsPicker, PICKER_FIXED_ROWS};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -115,6 +118,12 @@ pub struct App {
 
     // -- Lyrics --
     pub current_lyrics: Option<LyricsData>,
+    /// Plain (unsynced) lyrics of the playing track; `current_lyrics` holds synced ones.
+    pub current_plain_lyrics: Option<Vec<String>>,
+    /// True while the playing track's lyrics are being looked up online.
+    pub lyrics_searching: bool,
+    /// The list of other lyrics for the playing track, while it is open.
+    pub lyrics_picker: Option<LyricsPicker>,
     pub now_playing_meta: Option<TrackMetadata>,
     pub show_full_lyrics: bool,
 
@@ -266,6 +275,9 @@ impl App {
             search_results: Vec::new(),
             search_cursor: 0,
             current_lyrics: None,
+            current_plain_lyrics: None,
+            lyrics_searching: false,
+            lyrics_picker: None,
             now_playing_meta: None,
             show_full_lyrics: false,
             awaiting_dir_input: awaiting,
@@ -513,6 +525,7 @@ impl App {
                     self.refresh_needed = true;
                 }
             }
+            PlayerEvent::SpotifyLyrics { uri, lyrics } => self.handle_spotify_lyrics(uri, lyrics),
             PlayerEvent::SpotifySignInLost => {
                 self.spotify_view.connected = false;
                 self.spotify_view.error = Some(
@@ -700,6 +713,7 @@ impl App {
                                 let meta = TrackMetadata {
                                     title: Some(it.title),
                                     artist: it.subtitle,
+                                    album: it.album,
                                     duration: it.duration_secs.map(std::time::Duration::from_secs),
                                     cover_url: it.artwork_url,
                                     ..Default::default()
@@ -742,6 +756,12 @@ impl App {
                         self.refresh_needed = true;
                     }
                 }
+            }
+            SourceEvent::LyricsFetched { track, result } => {
+                self.handle_lyrics_fetched(track, result)
+            }
+            SourceEvent::LyricsMatches { track, result } => {
+                self.handle_lyrics_matches(track, result)
             }
             SourceEvent::CoverFetched { .. } => {
                 self.generate_cover_art_protocol();
@@ -1075,16 +1095,6 @@ impl App {
         self.now_playing_meta = self.playlist.current_entry().map(|e| e.metadata.clone());
     }
 
-    /// Load external .lrc or embedded tag lyrics for the current track.
-    fn load_lyrics_for_current(&mut self) {
-        self.current_lyrics = self.playlist.current_entry().and_then(|e| {
-            e.id.local_path().and_then(|path| {
-                lyrics::load_lyrics_from_lrc(path)
-                    .or_else(|| lyrics::load_lyrics_from_metadata(path))
-            })
-        });
-    }
-
     pub fn generate_cover_art_protocol(&mut self) {
         // Clean up the previous cover art cache file
         if let Some(old_path) = self.last_cover_tmp_path.take() {
@@ -1157,7 +1167,8 @@ impl App {
         } else if let Some(cover_url) = self
             .playlist
             .current_entry()
-            .and_then(|e| e.metadata.cover_url.clone())
+            .and_then(|e| e.metadata.cover_url.as_deref())
+            .map(crate::sources::youtube::full_size_cover)
         {
             let cover_hash = crate::utils::hash::fnv1a_hex(&cover_url);
             let cache_dir = directories::ProjectDirs::from("", "", "mixed")
@@ -1298,6 +1309,11 @@ impl App {
                         );
                         self.load_generation = player.generation;
                     }
+                    // Clears what the previous track showed and requests this track's
+                    // lyrics and cover. Spotify's own lyrics need the session that the
+                    // load above connects, so this comes after it.
+                    self.load_lyrics_for_current();
+                    self.generate_cover_art_protocol();
                     self.push_mpris_metadata();
                     self.push_mpris_playback();
                     self.refresh_needed = true;
@@ -1334,12 +1350,26 @@ impl App {
             self.stop();
             self.now_playing_meta = None;
             self.current_cover_protocol = None;
-            self.current_lyrics = None;
+            self.clear_lyrics();
             self.refresh_needed = true;
         }
     }
 
+    /// After a stop nothing is loaded any more, so playing means starting the
+    /// current track again. Returns false if playback was not stopped.
+    fn restart_if_stopped(&mut self) -> bool {
+        let restart = self.stopped && !self.playlist.is_empty();
+        if restart {
+            self.play_current();
+            self.refresh_needed = true;
+        }
+        restart
+    }
+
     pub fn play(&mut self) {
+        if self.restart_if_stopped() {
+            return;
+        }
         self.stopped = false;
         if let Some(p) = self.player.as_mut() {
             p.play()
@@ -1411,6 +1441,9 @@ impl App {
     }
 
     pub fn toggle_pause(&mut self) {
+        if self.restart_if_stopped() {
+            return;
+        }
         if let Some(p) = self.player.as_mut() {
             let was_paused = p.is_paused();
             p.toggle_pause();
@@ -1420,6 +1453,16 @@ impl App {
         };
         self.push_mpris_playback();
         self.refresh_needed = true;
+    }
+
+    /// Skip to the next track at the user's request. Unlike the end of a track,
+    /// this leaves the last track of the queue playing.
+    pub fn skip_to_next(&mut self) {
+        if !self.playlist.is_empty() && !self.playlist.can_go_next() {
+            self.set_status("This is the last track of the queue");
+            return;
+        }
+        self.next_track();
     }
 
     pub fn next_track(&mut self) {
@@ -2072,6 +2115,7 @@ impl App {
                                 let meta = TrackMetadata {
                                     title: Some(child.title.clone()),
                                     artist: child.subtitle.clone(),
+                                    album: child.album.clone(),
                                     duration: child
                                         .duration_secs
                                         .map(std::time::Duration::from_secs),
@@ -2104,6 +2148,7 @@ impl App {
                 let meta = crate::data::metadata::TrackMetadata {
                     title: Some(item.title),
                     artist: item.subtitle,
+                    album: item.album,
                     duration: item.duration_secs.map(std::time::Duration::from_secs),
                     cover_url: item.artwork_url.clone(),
                     ..Default::default()

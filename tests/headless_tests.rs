@@ -1184,6 +1184,7 @@ fn test_remote_source_browse_and_search_rendering() {
                 track_ref: None,
                 duration_secs: None,
                 artwork_url: None,
+                album: None,
                 depth: 0,
             },
             BrowseItem {
@@ -1195,6 +1196,7 @@ fn test_remote_source_browse_and_search_rendering() {
                 track_ref: Some(TrackRef::Spotify("spotify:track:1".into())),
                 duration_secs: Some(320),
                 artwork_url: None,
+                album: None,
                 depth: 0,
             },
         ];
@@ -1228,6 +1230,7 @@ fn test_remote_source_browse_and_search_rendering() {
             track_ref: Some(TrackRef::Spotify("spotify:track:2".into())),
             duration_secs: Some(224),
             artwork_url: None,
+            album: None,
             depth: 0,
         }];
         view.cursor = 0;
@@ -1400,6 +1403,7 @@ fn test_stale_search_reply_dropped_after_new_query() {
         )),
         duration_secs: Some(238),
         artwork_url: None,
+        album: None,
         depth: 0,
     }];
 
@@ -1434,6 +1438,7 @@ fn test_stale_search_reply_dropped_after_new_query() {
         )),
         duration_secs: Some(264),
         artwork_url: None,
+        album: None,
         depth: 0,
     }];
 
@@ -1597,6 +1602,7 @@ fn test_shift_enter_play_next_local_and_remote() {
         track_ref: Some(mixed::data::track::TrackRef::YouTube("vid1".to_string())),
         duration_secs: Some(180),
         artwork_url: None,
+        album: None,
         depth: 0,
     }];
     app.youtube_view.search_cursor = 0;
@@ -1703,6 +1709,7 @@ fn test_remote_browse_space_toggles_container_expansion() {
         track_ref: None,
         duration_secs: None,
         artwork_url: None,
+        album: None,
         depth: 0,
     };
 
@@ -1796,4 +1803,169 @@ fn test_rejected_spotify_playback_sign_in_asks_to_sign_in_again() {
         .error
         .as_deref()
         .is_some_and(|e| e.contains("sign in again")));
+}
+
+#[test]
+fn test_lyrics_picker_opens_with_y_and_takes_the_keys() {
+    use mixed::data::metadata::TrackMetadata;
+    use mixed::data::track::TrackRef;
+    use mixed::sources::{LyricsCandidate, LyricsSync, SourceEvent};
+
+    let mut app = create_test_app();
+    let track = TrackRef::YouTube("TestPickerKeys01".into());
+    app.playlist.add(
+        track.clone(),
+        TrackMetadata {
+            title: Some("Song".into()),
+            artist: Some("Artist".into()),
+            ..Default::default()
+        },
+    );
+    app.active_panel = ActivePanel::NowPlaying;
+    let press = |app: &mut App, code| {
+        events::handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
+    };
+
+    press(&mut app, KeyCode::Char('y'));
+    assert!(app.lyrics_picker.is_some());
+    assert!(
+        app.show_full_lyrics,
+        "the list needs the room of the full view"
+    );
+
+    let candidate = |title: &str, sync| LyricsCandidate {
+        provider: "LRCLIB",
+        title: title.into(),
+        artist: "Artist".into(),
+        album: Some("Album".into()),
+        duration_secs: Some(185),
+        sync,
+        text: "[00:01.00]line".into(),
+    };
+    app.handle_source_event(SourceEvent::LyricsMatches {
+        track,
+        result: Ok((0..30)
+            .map(|i| candidate(&format!("Song {i}"), LyricsSync::Line))
+            .collect()),
+    });
+
+    // Keys that normally control playback move in the list instead
+    for _ in 0..40 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.lyrics_picker.as_ref().unwrap().cursor, 31);
+    assert!(app.playlist.len() == 1 && !app.searching);
+
+    // Typed search words go to the list, not to the global shortcuts
+    press(&mut app, KeyCode::Char('/'));
+    for c in "my song q".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+    assert_eq!(
+        app.lyrics_picker.as_ref().unwrap().input.as_deref(),
+        Some("my song q")
+    );
+
+    // Drawn at the end of a long list, in a small and a large terminal
+    for (w, h) in [(80, 24), (40, 12), (200, 60)] {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| layout::draw(f, &mut app)).unwrap();
+    }
+
+    press(&mut app, KeyCode::Esc);
+    assert!(app.lyrics_picker.as_ref().unwrap().input.is_none());
+    press(&mut app, KeyCode::Esc);
+    assert!(app.lyrics_picker.is_none());
+}
+
+#[test]
+fn test_plain_and_pending_lyrics_render_in_both_lyrics_views() {
+    use mixed::data::metadata::TrackMetadata;
+    use mixed::data::track::TrackRef;
+
+    let mut app = create_test_app();
+    app.playlist.add(
+        TrackRef::YouTube("TestPlainLyrics01".into()),
+        TrackMetadata {
+            title: Some("Song".into()),
+            ..Default::default()
+        },
+    );
+    app.active_panel = ActivePanel::NowPlaying;
+
+    let text_of = |app: &mut App| {
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| layout::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+
+    for full in [false, true] {
+        app.show_full_lyrics = full;
+
+        app.lyrics_searching = true;
+        assert!(text_of(&mut app).contains("Searching for lyrics"));
+        app.lyrics_searching = false;
+
+        app.current_plain_lyrics = Some(vec!["plain words here".into()]);
+        let screen = text_of(&mut app);
+        if full {
+            assert!(screen.contains("plain words here"));
+        } else {
+            assert!(screen.contains("Untimed Lyrics"));
+        }
+        app.current_plain_lyrics = None;
+    }
+
+    app.show_full_lyrics = true;
+    assert!(text_of(&mut app).contains("Press 'y' to search"));
+}
+
+#[test]
+fn test_next_on_the_last_track_keeps_playing_and_play_restarts_after_stop() {
+    use mixed::data::metadata::TrackMetadata;
+    use mixed::data::track::TrackRef;
+
+    let mut app = create_test_app();
+    for id in ["TestLastTrack01", "TestLastTrack02"] {
+        app.playlist.add(
+            TrackRef::Spotify(format!("spotify:track:{id}")),
+            TrackMetadata {
+                title: Some(id.into()),
+                ..Default::default()
+            },
+        );
+    }
+    app.spotify_view.connected = true;
+    app.play_current();
+    let press = |app: &mut App, c| {
+        events::handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    };
+
+    press(&mut app, 'l');
+    assert_eq!(app.playlist.current_real_index(), Some(1));
+
+    // There is no next track: the last one must go on playing
+    press(&mut app, 'l');
+    assert_eq!(app.playlist.current_real_index(), Some(1));
+    assert!(
+        !app.stopped,
+        "next on the last track does not stop playback"
+    );
+    assert!(app
+        .status_msg
+        .as_deref()
+        .is_some_and(|s| s.contains("last track")));
+
+    // The queue ending by itself still stops, and play then starts the track again
+    app.next_track();
+    assert!(app.stopped);
+    app.buffering = false;
+    press(&mut app, 'p');
+    assert!(!app.stopped, "play after a stop restarts the current track");
+    assert!(app.buffering, "the track is being loaded again");
 }
