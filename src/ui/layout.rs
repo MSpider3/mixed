@@ -15,56 +15,165 @@ use crate::ui::artwork;
 use crate::ui::branding;
 use crate::ui::lyrics_widget;
 use crate::ui::visualizer_widget;
+use unicode_width::UnicodeWidthStr;
 
 pub use crate::ui::theme::*;
 pub use crate::ui::widgets::*;
 
-/// Main render function — dispatches to the appropriate view inside a global two-pane layout.
-fn render_instructions(
-    f: &mut Frame,
-    area: Rect,
-    panel: ActivePanel,
-    source: crate::sources::SourceTab,
-) {
-    let text = match panel {
-        ActivePanel::Queue => match source {
-            crate::sources::SourceTab::Unified => {
-                "Unified Queue  •  Sources: Ctrl+1..4  •  Move: ↑/↓/k/j  •  Play: Enter  •  Del: Remove"
-            }
-            _ => "Sources: Ctrl+1..4 (or Alt+1..4)  •  Move: ↑/↓/k/j  •  Play: Enter  •  Del: Remove",
-        },
-        ActivePanel::Library => match source {
-            crate::sources::SourceTab::Local => {
-                "Local Library  •  Enter: Play/Enqueue  •  Space/Right: Open Folder  •  Backspace/Left: Up  •  Search: /"
-            }
-            crate::sources::SourceTab::Spotify => {
-                "Spotify Library  •  Enter: Play/Enqueue  •  Space/Right: Open Folder  •  Backspace/Left: Up  •  Search: /"
-            }
-            crate::sources::SourceTab::YouTube => {
-                "YouTube Music  •  Enter: Play/Enqueue  •  Space/Right: Open Folder  •  Backspace/Left: Up  •  Search: /"
-            }
-            crate::sources::SourceTab::Unified => {
-                "Unified Library  •  Navigate: ↑/↓/k/j  •  Search: /"
-            }
-        },
-        ActivePanel::Search => {
-            "Search Active Source  •  Type query  •  Select: ↑/↓  •  Enqueue: Enter"
+/// One short row of key + action pairs for the current view; pairs that do not fit
+/// are left out from the end.
+fn render_instructions(f: &mut Frame, area: Rect, app: &App) {
+    let pairs: &[(&str, &str)] = match app.active_panel {
+        ActivePanel::Queue => &[
+            ("↑↓", "move"),
+            ("Enter", "play"),
+            ("Del", "remove"),
+            ("f g", "reorder"),
+            ("Ctrl+1-4", "source"),
+            ("F6", "keys"),
+        ],
+        ActivePanel::Library => &[
+            ("↑↓", "move"),
+            ("Enter", "queue"),
+            ("→", "open"),
+            ("←", "up"),
+            ("/", "search"),
+            ("F6", "keys"),
+        ],
+        ActivePanel::Search => &[
+            ("type", "search"),
+            ("Tab", "next group"),
+            ("↑↓", "move"),
+            ("Enter", "queue"),
+            ("Esc", "done"),
+        ],
+        ActivePanel::NowPlaying => &[
+            ("Space", "pause"),
+            ("a d", "seek"),
+            ("m", "lyrics"),
+            ("y", "other lyrics"),
+            ("v", "visualizer"),
+            ("F6", "keys"),
+        ],
+        ActivePanel::Help if app.help_filtering => {
+            &[("type", "filter"), ("Enter", "keep"), ("Esc", "clear")]
         }
-        ActivePanel::NowPlaying => {
-            "Now Playing  •  Lyrics: m  •  Visualizer: v  •  Sources: Ctrl+1..4"
-        }
-        ActivePanel::Help => "Switch Views: F2-F6 / Tab  •  Sources: Ctrl+1..4  •  Quit: q",
+        ActivePanel::Help => &[("/", "filter"), ("Esc", "back")],
     };
-    let widget = Paragraph::new(Line::from(Span::styled(
-        text,
-        Style::default().fg(C_DIM).add_modifier(Modifier::ITALIC),
-    )))
-    .alignment(ratatui::layout::Alignment::Center);
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (key, action) in pairs {
+        let gap = if spans.is_empty() { 0 } else { 3 };
+        let w = gap + key.width() + 1 + action.width();
+        if used + w > area.width as usize {
+            break;
+        }
+        if gap > 0 {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(Span::styled(
+            *key,
+            Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", action),
+            Style::default().fg(C_INACTIVE),
+        ));
+        used += w;
+    }
+    let widget = Paragraph::new(Line::from(spans)).alignment(ratatui::layout::Alignment::Center);
     f.render_widget(widget, area);
+}
+
+/// Three rows under the cover: what plays, how far it is, and shuffle, repeat
+/// and volume. Clicking the progress line seeks.
+fn draw_mini_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
+    let Some(entry) = app.playlist.current_entry() else {
+        return;
+    };
+    let w = area.width as usize;
+    let title = entry
+        .metadata
+        .display_title(app.config.strip_track_numbers)
+        .to_string();
+    let artist = entry.metadata.display_artist().to_string();
+    let paused = app.player.as_ref().map(|p| p.is_paused()).unwrap_or(true);
+    let elapsed = app.display_elapsed_ms();
+    let total = app.player.as_ref().map(|p| p.duration_ms()).unwrap_or(0);
+    let volume = app.player.as_ref().map(|p| p.volume()).unwrap_or(100);
+
+    let title_w = title.width().min(w.saturating_sub(2));
+    let line1 = Line::from(vec![
+        Span::styled(
+            if paused { "⏸ " } else { "▶ " },
+            Style::default().fg(C_ACCENT2),
+        ),
+        Span::styled(
+            fit(&title, title_w),
+            Style::default().fg(C_FG).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            fit(&format!(" · {}", artist), w.saturating_sub(2 + title_w)),
+            Style::default().fg(C_DIM),
+        ),
+    ]);
+
+    let line2 = if app.buffering {
+        Line::from(Span::styled("buffering…", Style::default().fg(C_CYAN)))
+    } else {
+        let (left, right) = (format_time(elapsed), format_time(total));
+        let bar_w = w.saturating_sub(left.width() + right.width() + 2);
+        let ratio = if total > 0 {
+            (elapsed as f64 / total as f64).min(1.0)
+        } else {
+            0.0
+        };
+        let filled = ((ratio * bar_w as f64).round() as usize).min(bar_w);
+        app.ui_bounds.progress_bar_rect = Some(Rect::new(
+            area.x + left.width() as u16 + 1,
+            area.y + 1,
+            bar_w as u16,
+            1,
+        ));
+        Line::from(vec![
+            Span::styled(left, Style::default().fg(C_DIM)),
+            Span::raw(" "),
+            Span::styled("━".repeat(filled), Style::default().fg(C_ACCENT2)),
+            Span::styled("─".repeat(bar_w - filled), Style::default().fg(C_INACTIVE)),
+            Span::raw(" "),
+            Span::styled(right, Style::default().fg(C_DIM)),
+        ])
+    };
+
+    let shuffle = if app.playlist.shuffle {
+        "⤨ on"
+    } else {
+        "⤨ off"
+    };
+    let repeat = match app.playlist.repeat {
+        crate::data::playlist::RepeatMode::Off => "↻ off",
+        crate::data::playlist::RepeatMode::Track => "↻ track",
+        crate::data::playlist::RepeatMode::Queue => "↻ queue",
+    };
+    let modes = format!("{}   {}", shuffle, repeat);
+    let line3 = Line::from(vec![
+        Span::styled(modes.clone(), Style::default().fg(C_INACTIVE)),
+        Span::styled(
+            fit_right(&format!("vol {}%", volume), w.saturating_sub(modes.width())),
+            Style::default().fg(C_DIM),
+        ),
+    ]);
+
+    f.render_widget(Paragraph::new(vec![line1, line2, line3]), area);
 }
 
 /// Main render function — dispatches to the appropriate view inside a global two-pane layout.
 pub fn draw(f: &mut Frame, app: &mut App) {
+    draw_screen(f, app);
+    crate::ui::theme::adapt(f.buffer_mut());
+}
+
+fn draw_screen(f: &mut Frame, app: &mut App) {
     app.ui_bounds.reset();
     let size = f.area();
 
@@ -127,13 +236,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
             let aspect_ratio = artwork::get_cell_aspect_ratio();
             let h_if_full_w = (max_w as f32 / aspect_ratio) as u16;
-            // Reserve 2 vertical lines for spacer (1) + mini-controls (1)
-            let max_art_h = art_area.height.saturating_sub(4);
+            // Below the art: spacer and mini-controls, then spacer and 3 rows of now playing
+            let below = if app.playlist.is_empty() { 2 } else { 6 };
+            let max_art_h = art_area.height.saturating_sub(below + 2);
             let art_h = h_if_full_w.min(max_art_h).max(4);
             let art_w = (((art_h as f32) * aspect_ratio) as u16).min(max_w).max(4);
 
-            // Combined block height = Album Art (art_h) + Spacer (1) + Mini-controls (1)
-            let total_block_h = art_h + 2;
+            let total_block_h = art_h + below;
             let v_space = art_area.height.saturating_sub(total_block_h);
             let top_offset = art_area.y + v_space / 2;
 
@@ -149,6 +258,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             if ctrl_y < art_area.y + art_area.height {
                 let ctrl_area = Rect::new(art_area.x, ctrl_y, art_area.width, 1);
                 draw_mini_controls(f, app, ctrl_area);
+            }
+
+            // What plays, as wide as the art (at least 24 columns), under the controls
+            let bar_y = ctrl_y + 2;
+            if !app.playlist.is_empty() && bar_y + 3 <= art_area.y + art_area.height {
+                let bar_w = art_w.max(24).min(art_area.width.saturating_sub(2));
+                let bar_x = art_area.x + (art_area.width - bar_w) / 2;
+                draw_mini_now_playing(f, app, Rect::new(bar_x, bar_y, bar_w, 3));
             }
         } else {
             // Track tab (NowPlaying): Vertically centered artwork, NO mini-controls
@@ -218,7 +335,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
 
         if let Some(inst_rect) = instructions_area {
-            render_instructions(f, inst_rect, app.active_panel, app.source);
+            render_instructions(f, inst_rect, app);
         }
 
         app.ui_bounds.left_panel_rect = Some(tab_area);
@@ -237,7 +354,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 ActivePanel::Queue => draw_queue(f, app, tab_area),
                 ActivePanel::Library => draw_library(f, app, tab_area),
                 ActivePanel::Search => draw_search(f, app, tab_area),
-                ActivePanel::Help => draw_help(f, tab_area),
+                ActivePanel::Help => draw_help(f, app, tab_area),
                 ActivePanel::NowPlaying => unreachable!(),
             }
         }
@@ -277,7 +394,7 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
         let constraints = vec![
             Constraint::Length(6), // 0. Top Logo
             Constraint::Length(1), // 1. Shortcut instructions
-            Constraint::Length(3), // 2. Metadata
+            Constraint::Length(4), // 2. Metadata
             Constraint::Length(1), // 3. Spacer
             Constraint::Fill(1),   // 4. Scrollable Lyrics
             Constraint::Length(1), // 5. Spacer
@@ -289,7 +406,7 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
             .split(area);
 
         branding::render_logo_with_song(f, layout[0], song_name);
-        render_instructions(f, layout[1], ActivePanel::NowPlaying, app.source);
+        render_instructions(f, layout[1], app);
         draw_metadata(f, app, layout[2]);
         draw_lyrics(f, app, layout[4]);
         draw_progress(f, app, layout[6]);
@@ -300,7 +417,7 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
     let constraints = vec![
         Constraint::Length(6), // 0. Top Logo
         Constraint::Length(1), // 1. Shortcut instructions
-        Constraint::Length(3), // 2. Metadata (centered)
+        Constraint::Length(4), // 2. Metadata (centered)
         Constraint::Length(1), // 3. Spacer
         Constraint::Length(3), // 4. Lyrics Engine (max 3 lines, toggleable with 'm')
         Constraint::Length(1), // 5. Spacer
@@ -315,7 +432,7 @@ fn draw_info_pane(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     branding::render_logo_with_song(f, layout[0], song_name);
-    render_instructions(f, layout[1], ActivePanel::NowPlaying, app.source);
+    render_instructions(f, layout[1], app);
     draw_metadata(f, app, layout[2]);
     draw_lyrics(f, app, layout[4]);
     draw_visualizer(f, app, layout[6]);
@@ -337,17 +454,28 @@ fn draw_metadata(f: &mut Frame, app: &mut App, area: Rect) {
         let artist_x = area.x + area.width.saturating_sub(artist_w) / 2;
         app.ui_bounds.artist_rect = Some(Rect::new(artist_x, area.y + 1, artist_w, 1));
 
-        let lines = vec![
+        let album = match meta.year {
+            Some(year) => format!("{}  ·  {}", meta.display_album(), year),
+            None => meta.display_album().to_string(),
+        };
+        let mut lines = vec![
             Line::from(Span::styled(
                 title_str,
-                Style::default().fg(C_FG).add_modifier(Modifier::BOLD),
+                Style::default().fg(C_ACCENT2).add_modifier(Modifier::BOLD),
             )),
-            Line::from(Span::styled(artist_str, Style::default().fg(C_ACCENT))),
             Line::from(Span::styled(
-                meta.display_album(),
-                Style::default().fg(C_DIM),
+                artist_str,
+                Style::default().fg(C_FG).add_modifier(Modifier::UNDERLINED),
             )),
+            Line::from(Span::styled(album, Style::default().fg(C_DIM))),
         ];
+        // What the file is and its quality
+        if let Some(summary) = &app.audio_summary {
+            lines.push(Line::from(Span::styled(
+                format!(" {} ", summary),
+                Style::default().fg(C_DIM).bg(C_ROW_BG),
+            )));
+        }
         let widget = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
         f.render_widget(widget, area);
     }
@@ -749,108 +877,215 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Queue summary header (Q2)
-    let mut list_area = area;
-    if area.height >= 2 {
-        let total_secs = app.playlist.total_duration_secs();
-        let hours = total_secs / 3600;
-        let mins = (total_secs % 3600) / 60;
-        let duration_str = if hours > 0 {
-            format!("{}h {}m", hours, mins)
-        } else {
-            format!("{} min", mins)
-        };
-        let n = app.playlist.len();
-        let summary = format!(
-            "  {} {}  ·  {}",
+    // Where each track stands in the play order: before the playing one means played
+    let mut play_pos = vec![usize::MAX; app.playlist.len()];
+    for (pos, &entry_idx) in app.playlist.play_order.iter().enumerate() {
+        if let Some(slot) = play_pos.get_mut(entry_idx) {
+            *slot = pos;
+        }
+    }
+    let playing_real = app.playlist.current_real_index();
+    let current_pos = app.playlist.current;
+
+    // Header: size of the queue, and what is still to come
+    let n = app.playlist.len();
+    let mut header = vec![Span::styled(
+        format!(
+            "  Queue  ·  {} {}  ·  {}",
             n,
             if n == 1 { "track" } else { "tracks" },
-            duration_str
-        );
-        let summary_area = Rect::new(area.x, area.y, area.width, 1);
-        let header_line = Line::from(Span::styled(summary, Style::default().fg(C_DIM)));
-        f.render_widget(Paragraph::new(header_line), summary_area);
-        list_area = Rect::new(
-            area.x,
-            area.y + 1,
-            area.width,
-            area.height.saturating_sub(1),
-        );
+            format_total(app.playlist.total_duration_secs())
+        ),
+        Style::default().fg(C_DIM),
+    )];
+    if playing_real.is_some() {
+        let up_next = app
+            .playlist
+            .play_order
+            .get(current_pos + 1..)
+            .unwrap_or(&[]);
+        let left_secs: u64 = up_next
+            .iter()
+            .filter_map(|&i| app.playlist.entries.get(i)?.metadata.duration)
+            .map(|d| d.as_secs())
+            .sum();
+        header.push(Span::styled(
+            format!(
+                "     up next {}  ·  {}",
+                up_next.len(),
+                format_total(left_secs)
+            ),
+            Style::default().fg(C_INACTIVE),
+        ));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(header)),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if area.height < 3 {
+        return;
     }
 
+    // Columns: bar, number, title, artist, album (when there is room), source, time
+    let width = area.width.saturating_sub(1) as usize; // the scrollbar column
+                                                       // Fixed cells: bar 1, number 5 + 1, gaps 2 + 2 (+ 2 before the album), source 1 + 1, time 5
+    let with_album = width >= 20 + 50;
+    let room = width.saturating_sub(if with_album { 20 } else { 18 });
+    let (title_w, artist_w, album_w) = if with_album {
+        let t = room * 45 / 100;
+        let a = room * 30 / 100;
+        (t, a, room - t - a)
+    } else {
+        let t = room * 60 / 100;
+        (t, room - t, 0)
+    };
+    let column_line = |num: String,
+                       title: String,
+                       artist: String,
+                       album: String,
+                       dot: String,
+                       time: String,
+                       styles: [Style; 6]| {
+        let mut spans = vec![
+            Span::styled(fit_right(&num, 5), styles[0]),
+            Span::styled(" ", styles[0]),
+            Span::styled(fit(&title, title_w), styles[1]),
+            Span::styled("  ", styles[1]),
+            Span::styled(fit(&artist, artist_w), styles[2]),
+            Span::styled("  ", styles[2]),
+        ];
+        if with_album {
+            spans.push(Span::styled(fit(&album, album_w), styles[3]));
+            spans.push(Span::styled("  ", styles[3]));
+        }
+        spans.push(Span::styled(fit(&dot, 1), styles[4]));
+        spans.push(Span::styled(" ", styles[4]));
+        spans.push(Span::styled(fit_right(&time, 5), styles[5]));
+        spans
+    };
+    let faint = Style::default().fg(C_INACTIVE);
+    let mut column_titles = vec![Span::raw(" ")];
+    column_titles.extend(column_line(
+        "#".into(),
+        "Title".into(),
+        "Artist".into(),
+        "Album".into(),
+        String::new(),
+        "Time".into(),
+        [faint; 6],
+    ));
+    f.render_widget(
+        Paragraph::new(Line::from(column_titles)),
+        Rect::new(area.x, area.y + 1, area.width, 1),
+    );
+
+    let list_area = Rect::new(area.x, area.y + 2, area.width, area.height - 2);
     let visual_items = app
         .playlist
         .get_visual_items(app.show_folders, app.config.strip_track_numbers);
-    let playing_real = app.playlist.current_real_index();
-
     let visible_height = list_area.height as usize;
     let half = visible_height / 2;
 
-    // Find the visual index corresponding to app.queue_cursor
-    let mut highlighted_visual_idx = 0;
-    for (idx, item) in visual_items.iter().enumerate() {
-        if let QueueVisualItem::Track { entry_idx, .. } = item {
-            if *entry_idx == app.queue_cursor {
-                highlighted_visual_idx = idx;
-                break;
-            }
-        }
-    }
-
-    let scroll = highlighted_visual_idx.saturating_sub(half);
-    let scroll = scroll.min(visual_items.len().saturating_sub(1));
-    let start = scroll;
-    let end = (scroll + visible_height).min(visual_items.len());
-    let end = end.max(start);
+    // Keep the cursor's row in the middle of the list
+    let highlighted_visual_idx = visual_items
+        .iter()
+        .position(|item| {
+            matches!(item, QueueVisualItem::Track { entry_idx, .. } if *entry_idx == app.queue_cursor)
+        })
+        .unwrap_or(0);
+    let start = highlighted_visual_idx
+        .saturating_sub(half)
+        .min(visual_items.len().saturating_sub(1));
+    let end = (start + visible_height).min(visual_items.len()).max(start);
 
     let mut display_lines = Vec::new();
-
-    for i in start..end {
-        let item = &visual_items[i];
+    let mut rows = Vec::new();
+    for (row, item) in visual_items[start..end].iter().enumerate() {
         match item {
             QueueVisualItem::Header { name } => {
+                let style = Style::default().fg(C_ORANGE).add_modifier(Modifier::BOLD);
                 display_lines.push(Line::from(vec![
-                    Span::styled(
-                        "  📁 ",
-                        Style::default().fg(C_ORANGE).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        name.as_str(),
-                        Style::default().fg(C_ORANGE).add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled("  📁 ", style),
+                    Span::styled(name.clone(), style),
                 ]));
             }
-            QueueVisualItem::Separator => {
-                display_lines.push(Line::from("  "));
-            }
-            QueueVisualItem::Track {
-                entry_idx, title, ..
-            } => {
+            QueueVisualItem::Separator => display_lines.push(Line::from("  ")),
+            QueueVisualItem::Track { entry_idx, .. } => {
+                let Some(entry) = app.playlist.entries.get(*entry_idx) else {
+                    display_lines.push(Line::from(""));
+                    continue;
+                };
+                rows.push((list_area.y + row as u16, *entry_idx));
+                let meta = &entry.metadata;
                 let is_playing = Some(*entry_idx) == playing_real;
                 let is_cursor = *entry_idx == app.queue_cursor;
-                let prefix = if is_playing { "▶ " } else { "  " };
+                let played = !is_playing
+                    && playing_real.is_some()
+                    && play_pos.get(*entry_idx).is_some_and(|&p| p < current_pos);
+                let source = match entry.id {
+                    crate::data::track::TrackRef::Local(_) => crate::app::SourceTab::Local,
+                    crate::data::track::TrackRef::Spotify(_) => crate::app::SourceTab::Spotify,
+                    crate::data::track::TrackRef::YouTube(_) => crate::app::SourceTab::YouTube,
+                };
 
-                let style = row_style(is_cursor, is_playing);
-
-                display_lines.push(Line::from(vec![
-                    Span::styled("  ", style),
-                    Span::styled(prefix, style),
-                    Span::styled(title.as_str(), style),
-                ]));
+                // Playing: accent and ▶; played: dimmed; the cursor: a row background
+                let mut styles = if is_playing {
+                    [Style::default().fg(C_ACCENT2).add_modifier(Modifier::BOLD); 6]
+                } else if played {
+                    [Style::default().fg(C_INACTIVE); 6]
+                } else {
+                    [
+                        Style::default().fg(C_INACTIVE),
+                        Style::default().fg(C_FG),
+                        Style::default().fg(C_DIM),
+                        Style::default().fg(C_INACTIVE),
+                        Style::default(),
+                        Style::default().fg(C_DIM),
+                    ]
+                };
+                styles[4] = styles[4].fg(accent_for(source));
+                if is_cursor {
+                    for style in &mut styles {
+                        *style = style.bg(C_ROW_BG);
+                    }
+                    styles[1] = styles[1].add_modifier(Modifier::BOLD);
+                }
+                let num = if is_playing {
+                    "▶".to_string()
+                } else {
+                    (entry_idx + 1).to_string()
+                };
+                let mut spans = vec![Span::styled(
+                    if is_playing { "▎" } else { " " },
+                    styles[0].fg(C_ACCENT2),
+                )];
+                spans.extend(column_line(
+                    num,
+                    meta.display_title(app.config.strip_track_numbers)
+                        .to_string(),
+                    meta.display_artist().to_string(),
+                    meta.album.clone().unwrap_or_default(),
+                    "●".to_string(),
+                    meta.duration
+                        .map(|d| format_secs(d.as_secs()))
+                        .unwrap_or_default(),
+                    styles,
+                ));
+                display_lines.push(Line::from(spans));
             }
         }
     }
+    let total_items = visual_items.len();
+    drop(visual_items);
+    app.ui_bounds.rows = rows;
 
-    let widget = Paragraph::new(display_lines).alignment(ratatui::layout::Alignment::Left);
-    f.render_widget(widget, list_area);
+    f.render_widget(Paragraph::new(display_lines), list_area);
 
-    // Render vertical scrollbar if list exceeds visible height
-    if visual_items.len() > visible_height {
+    if total_items > visible_height {
         let scrollbar_col = list_area.x + list_area.width.saturating_sub(1);
         app.ui_bounds.scrollbar_rect =
             Some(Rect::new(scrollbar_col, list_area.y, 1, list_area.height));
-
-        render_scrollbar(f, list_area, visual_items.len(), visible_height, start);
+        render_scrollbar(f, list_area, total_items, visible_height, start);
     }
 }
 
@@ -890,33 +1125,52 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Determine enqueued status of the entire library using pre-calculated set
-    let all_enqueued = app.flat_library.iter().all(|item| {
-        if let LibraryEntry::Track { path, .. } = &item.entry {
-            app.playlist
-                .entry_ids
-                .contains(&crate::data::track::TrackRef::Local(path.clone()))
-        } else {
-            true
-        }
+    // Row 0, the breadcrumb: where you are and what this folder holds. Selecting it
+    // queues the whole folder, as before.
+    let top = app.flat_library.iter().filter(|item| item.depth == 0);
+    let (folders, tracks, secs) = top.fold((0, 0, 0), |(d, t, s), item| {
+        (
+            d + usize::from(item.entry.is_dir()),
+            t + item.tracks,
+            s + item.duration_secs,
+        )
     });
-
-    let header_text = if app.local_nav_stack.is_empty() {
-        if all_enqueued {
-            "*- MUSIC LIBRARY -".to_string()
-        } else {
-            "  - MUSIC LIBRARY -".to_string()
-        }
-    } else {
-        let path_str = app.current_local_path_display();
-        format!("  - {} (Backspace: up) -", path_str)
-    };
+    let all_enqueued = app.flat_library.iter().all(|item| item.enqueued);
+    let trail = std::iter::once("Local Library")
+        .chain(app.local_nav_stack.iter().map(|(_, name, _)| name.as_str()))
+        .collect::<Vec<_>>()
+        .join(" › ");
+    let mut counts = Vec::new();
+    if folders > 0 {
+        counts.push(format!(
+            "{} {}",
+            folders,
+            if folders == 1 { "folder" } else { "folders" }
+        ));
+    }
+    counts.push(format!(
+        "{} {}",
+        tracks,
+        if tracks == 1 { "track" } else { "tracks" }
+    ));
+    counts.push(format_total(secs));
     let is_header_cursor = app.library_cursor == 0;
     let header_style = if is_header_cursor {
         Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(C_CYAN)
     };
+    let header = Line::from(vec![
+        Span::styled(
+            if all_enqueued { "✓ " } else { "  " },
+            Style::default().fg(C_GREEN),
+        ),
+        Span::styled(trail, header_style),
+        Span::styled(
+            format!("   {}", counts.join("  ·  ")),
+            Style::default().fg(C_INACTIVE),
+        ),
+    ]);
 
     let visible_height = area.height as usize;
     let total_items = 1 + app.flat_library.len();
@@ -930,67 +1184,82 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
     let end = (scroll + visible_height).min(total_items);
     let end = end.max(start);
 
+    // Room for the name; the rest of the row holds counts or the track length
+    let width = area.width.saturating_sub(1) as usize;
+    const INFO_W: usize = 22;
     let mut list_items = Vec::new();
+    let mut rows = Vec::new();
 
     for i in start..end {
+        rows.push((area.y + (i - start) as u16, i));
         if i == 0 {
-            list_items.push(ListItem::new(Line::from(Span::styled(
-                header_text.as_str(),
-                header_style,
-            ))));
-        } else {
-            let idx = i - 1;
-            let item = &app.flat_library[idx];
-            let entry = &item.entry;
-            let entry_cursor_idx = idx + 1;
-            let is_cursor = entry_cursor_idx == app.library_cursor;
-
-            let enqueued = item.enqueued;
-            let is_playing = if let LibraryEntry::Track { path, .. } = entry {
-                app.playlist.current_entry().map(|e| &e.id)
-                    == Some(&crate::data::track::TrackRef::Local(path.clone()))
-            } else {
-                false
-            };
-
-            let (icon, style) = if entry.is_dir() {
-                let dir_icon = "📁 ";
-                let s = if is_cursor {
-                    Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(C_FG)
-                };
-                (dir_icon, s)
-            } else {
-                let s = row_style(is_cursor, is_playing);
-                let ic = if is_playing { "▶  " } else { "♪  " };
-                (ic, s)
-            };
-
-            let mut line_spans = Vec::new();
-            line_spans.push(Span::styled(if enqueued { "  * " } else { "    " }, style));
-
-            if !item.ancestor_last.is_empty() || item.is_last {
-                for &ancestor_is_last in &item.ancestor_last {
-                    if ancestor_is_last {
-                        line_spans.push(Span::styled("    ", style));
-                    } else {
-                        line_spans.push(Span::styled("│   ", style));
-                    }
-                }
-                if item.is_last {
-                    line_spans.push(Span::styled("└── ", style));
-                } else {
-                    line_spans.push(Span::styled("├── ", style));
-                }
-            }
-
-            line_spans.push(Span::styled(icon, style));
-            line_spans.push(Span::styled(entry.name(), style));
-
-            list_items.push(ListItem::new(Line::from(line_spans)));
+            list_items.push(ListItem::new(header.clone()));
+            continue;
         }
+        let item = &app.flat_library[i - 1];
+        let entry = &item.entry;
+        let is_cursor = i == app.library_cursor;
+        let is_playing = if let LibraryEntry::Track { path, .. } = entry {
+            app.playlist.current_entry().map(|e| &e.id)
+                == Some(&crate::data::track::TrackRef::Local(path.clone()))
+        } else {
+            false
+        };
+
+        let (icon, style) = if entry.is_dir() {
+            let s = if is_cursor {
+                Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C_FG)
+            };
+            ("📁 ", s)
+        } else {
+            let s = row_style(is_cursor, is_playing);
+            (if is_playing { "▶  " } else { "♪  " }, s)
+        };
+
+        let mut tree = String::new();
+        if !item.ancestor_last.is_empty() || item.is_last {
+            for &ancestor_is_last in &item.ancestor_last {
+                tree.push_str(if ancestor_is_last { "    " } else { "│   " });
+            }
+            tree.push_str(if item.is_last {
+                "└── "
+            } else {
+                "├── "
+            });
+        }
+        let info = if entry.is_dir() {
+            format!(
+                "{} {}  ·  {}",
+                item.tracks,
+                if item.tracks == 1 { "track" } else { "tracks" },
+                format_total(item.duration_secs)
+            )
+        } else {
+            match entry {
+                LibraryEntry::Track { metadata, .. } => metadata
+                    .duration
+                    .map(|d| format_secs(d.as_secs()))
+                    .unwrap_or_default(),
+                _ => String::new(),
+            }
+        };
+        let name_w = width.saturating_sub(2 + tree.width() + 3 + INFO_W).max(4);
+
+        list_items.push(ListItem::new(Line::from(vec![
+            // Queued: a check mark
+            Span::styled(
+                if item.enqueued { "✓ " } else { "  " },
+                Style::default().fg(C_GREEN),
+            ),
+            Span::styled(tree, style),
+            Span::styled(icon, style),
+            Span::styled(fit(entry.name(), name_w), style),
+            Span::styled(fit_right(&info, INFO_W), Style::default().fg(C_INACTIVE)),
+        ])));
     }
+    app.ui_bounds.rows = rows;
 
     let list = List::new(list_items);
     f.render_widget(list, area);
@@ -1012,95 +1281,9 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-// ─── Search View ───────────────────────────────────────────────────────────
-fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
-    if area.width < 5 || area.height < 3 {
-        return;
-    }
-
-    // Search input line with match counter (Q3) (Centered)
-    let input_area = Rect::new(area.x, area.y, area.width, 1);
-    let cursor = if app.searching { "█" } else { "" };
-    let count_span = if app.search_query.is_empty() {
-        Span::raw("")
-    } else if app.search_results.is_empty() {
-        Span::styled("  no results", Style::default().fg(C_RED))
-    } else {
-        Span::styled(
-            format!("  {} results", app.search_results.len()),
-            Style::default().fg(C_DIM),
-        )
-    };
-    let input_line = Line::from(vec![
-        Span::styled("Search: ", Style::default().fg(C_ACCENT)),
-        Span::styled(&app.search_query, Style::default().fg(C_FG)),
-        Span::styled(cursor, Style::default().fg(C_ACCENT2)),
-        count_span,
-    ]);
-    let input_widget = Paragraph::new(input_line).alignment(ratatui::layout::Alignment::Center);
-    f.render_widget(input_widget, input_area);
-
-    // Results below it (Left-Aligned, with 2-space padding)
-    let results_area = Rect::new(
-        area.x,
-        area.y + 2,
-        area.width,
-        area.height.saturating_sub(2),
-    );
-
-    let results_height = results_area.height as usize;
-    let scroll = if results_height > 0 && app.search_cursor >= results_height {
-        app.search_cursor - results_height + 1
-    } else {
-        0
-    };
-    let scroll = scroll.min(app.search_results.len().saturating_sub(1));
-    let start = scroll;
-    let end = (scroll + results_height).min(app.search_results.len());
-    let end = end.max(start);
-
-    let mut display_items = Vec::new();
-    for idx in start..end {
-        let entry = &app.search_results[idx];
-        let is_cursor = idx == app.search_cursor;
-        let style = if is_cursor {
-            Style::default().fg(C_FG).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(C_DIM)
-        };
-        let prefix = if entry.is_dir() { "📁 " } else { "♪  " };
-        display_items.push(Line::from(vec![
-            Span::styled("  ", style),
-            Span::styled(prefix, style),
-            Span::styled(entry.name(), style),
-        ]));
-    }
-
-    let list_widget = Paragraph::new(display_items).alignment(ratatui::layout::Alignment::Left);
-    f.render_widget(list_widget, results_area);
-
-    // Render vertical scrollbar if search results exceed visible height
-    if app.search_results.len() > results_height {
-        let scrollbar_col = results_area.x + results_area.width.saturating_sub(1);
-        app.ui_bounds.scrollbar_rect = Some(Rect::new(
-            scrollbar_col,
-            results_area.y,
-            1,
-            results_area.height,
-        ));
-
-        render_scrollbar(
-            f,
-            results_area,
-            app.search_results.len(),
-            results_height,
-            start,
-        );
-    }
-}
-
 /// One row of a remote library tree or search result list, drawn like the local
-/// library: enqueued marker, indentation by depth, folder/track icon, title, subtitle.
+/// library: queued check mark, indentation by depth, folder/track icon, title,
+/// subtitle, and the length of a track at the end.
 fn browse_row<'a>(
     item: &'a crate::sources::BrowseItem,
     is_cursor: bool,
@@ -1129,33 +1312,39 @@ fn browse_row<'a>(
     };
     let icon = if item.is_container {
         "📁 "
+    } else if item.id.starts_with(crate::sources::ADD_ALL_PREFIX) {
+        "+  "
     } else if is_playing {
         "▶  "
     } else {
         "♪  "
     };
-    let marker = if enqueued { "  * " } else { "    " };
     let indent = if item.depth > 0 {
         "    ".repeat(item.depth)
     } else {
         String::new()
     };
+    let length = item.duration_secs.map(format_secs).unwrap_or_default();
 
     // The title has priority; the subtitle only uses what is left of the row.
-    // marker (4) + indent + icon (4 cells) + scrollbar column
-    let title_room = width.saturating_sub(4 + indent.len() + 4 + 1);
+    // marker (2) + indent + icon (3) + length (6) + scrollbar column
+    let title_room = width.saturating_sub(2 + indent.len() + 3 + 6 + 1);
     let title = truncate_to_width(&item.title, title_room);
     let sub_room = title_room
         .saturating_sub(unicode_width::UnicodeWidthStr::width(title) + 3)
-        .min(20);
+        .min(28);
     let sub = if sub_room >= 4 {
         truncate_to_width(item.subtitle.as_deref().unwrap_or(""), sub_room)
     } else {
         ""
     };
+    let used = title.width() + if sub.is_empty() { 0 } else { 3 + sub.width() };
 
     Line::from(vec![
-        Span::styled(marker, style),
+        Span::styled(
+            if enqueued { "✓ " } else { "  " },
+            Style::default().fg(C_GREEN),
+        ),
         Span::styled(indent, style),
         Span::styled(icon, style),
         Span::styled(title, style),
@@ -1164,6 +1353,49 @@ fn browse_row<'a>(
             Style::default().fg(C_DIM),
         ),
         Span::styled(sub, Style::default().fg(C_DIM)),
+        Span::styled(
+            fit_right(&length, title_room.saturating_sub(used) + 6),
+            Style::default().fg(C_INACTIVE),
+        ),
+    ])
+}
+
+/// The breadcrumb of a remote library: where you are and what the open level holds.
+fn browse_breadcrumb(view: &crate::sources::SourceView, source_name: &str) -> Line<'static> {
+    let trail = std::iter::once(source_name)
+        .chain(view.nav_stack.iter().map(|s| s.title.as_str()))
+        .collect::<Vec<_>>()
+        .join(" › ");
+    let top = view.flat.iter().filter(|item| item.depth == 0);
+    let (folders, tracks, secs) = top.fold((0, 0, 0), |(d, t, s), item| {
+        (
+            d + usize::from(item.is_container),
+            t + usize::from(item.track_ref.is_some()),
+            s + item.duration_secs.unwrap_or(0),
+        )
+    });
+    let mut counts = Vec::new();
+    if folders > 0 {
+        counts.push(format!(
+            "{} {}",
+            folders,
+            if folders == 1 { "folder" } else { "folders" }
+        ));
+    }
+    if tracks > 0 {
+        counts.push(format!(
+            "{} {}",
+            tracks,
+            if tracks == 1 { "track" } else { "tracks" }
+        ));
+        counts.push(format_total(secs));
+    }
+    Line::from(vec![
+        Span::styled(format!("  {}", trail), Style::default().fg(C_CYAN)),
+        Span::styled(
+            format!("   {}", counts.join("  ·  ")),
+            Style::default().fg(C_INACTIVE),
+        ),
     ])
 }
 
@@ -1185,11 +1417,14 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     if !view.connected || view.awaiting_login_input {
-        let (status, status_color) = if view.connected {
-            ("Connected. Enter a Client ID to sign in with it.", C_FG)
-        } else {
-            ("Not connected. Press Enter to sign in.", C_RED)
-        };
+        let (status, status_color) =
+            if view.connected && app.source == crate::app::SourceTab::YouTube {
+                ("Connected. Paste a cookie header to sign in with it.", C_FG)
+            } else if view.connected {
+                ("Connected. Enter a Client ID to sign in with it.", C_FG)
+            } else {
+                ("Not connected. Press Enter to sign in.", C_RED)
+            };
         let mut lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -1223,15 +1458,19 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
             }
             crate::app::SourceTab::YouTube => {
                 lines.push(Line::from(Span::styled(
-                    "  • Requires Cookie header from music.youtube.com.",
+                    "  • Press Enter: a browser window opens just for mixed.",
                     Style::default().fg(C_FG),
                 )));
                 lines.push(Line::from(Span::styled(
-                    "  • Paste cookie or credentials to connect.",
+                    "  • Sign in to YouTube Music there, then close the window.",
                     Style::default().fg(C_FG),
                 )));
                 lines.push(Line::from(Span::styled(
-                    "  • Press Enter to paste cookie header.",
+                    "  • Search and play work without signing in (F5).",
+                    Style::default().fg(C_DIM),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "  • (Optional) Press c to paste a cookie header instead.",
                     Style::default().fg(C_DIM),
                 )));
             }
@@ -1324,23 +1563,19 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
         ])
         .split(area);
 
-    let breadcrumb = view.current_path_display(source_name);
-    let header_line = if view.nav_stack.is_empty() {
-        format!("  - {} -", breadcrumb)
-    } else {
-        format!("  - {} (Backspace: up) -", breadcrumb)
-    };
-    let header_widget = Paragraph::new(Line::from(Span::styled(
-        header_line,
-        Style::default().fg(C_CYAN),
-    )));
-    f.render_widget(header_widget, chunks[0]);
+    f.render_widget(
+        Paragraph::new(browse_breadcrumb(&view, source_name)),
+        chunks[0],
+    );
 
     let list_area = chunks[1];
     let visible_height = list_area.height as usize;
     let (start, end) = scroll_offset(view.cursor, view.flat.len(), visible_height);
     let mut display_lines = Vec::new();
 
+    app.ui_bounds.rows = (start..end)
+        .map(|i| (list_area.y + (i - start) as u16, i))
+        .collect();
     for (idx, item) in view.flat[start..end].iter().enumerate() {
         display_lines.push(browse_row(
             item,
@@ -1359,8 +1594,215 @@ fn draw_browse(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// The row under a search box: one chip per group of results, the shown one marked.
+/// Tab moves to the next chip.
+fn scope_chips(
+    groups: &[(crate::sources::ResultGroup, usize)],
+    scope: Option<crate::sources::ResultGroup>,
+) -> Line<'static> {
+    let total: usize = groups.iter().map(|&(_, n)| n).sum();
+    let chips = std::iter::once((None, "All", total))
+        .chain(groups.iter().map(|&(g, n)| (Some(g), g.label(), n)));
+    let mut spans = vec![Span::raw("  ")];
+    for (chip_scope, label, n) in chips {
+        let style = if chip_scope == scope {
+            Style::default()
+                .fg(C_ACCENT2)
+                .bg(C_ROW_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(C_DIM)
+        };
+        spans.push(Span::styled(format!(" {} {} ", label, n), style));
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::styled("Tab: next", Style::default().fg(C_INACTIVE)));
+    Line::from(spans)
+}
+
+/// Rows of a grouped result list: a heading before each group, then its results.
+/// `None` is a heading; `Some(i)` is result `i`.
+fn grouped_rows<T>(
+    results: &[T],
+    group: impl Fn(&T) -> crate::sources::ResultGroup,
+) -> Vec<Option<usize>> {
+    let mut rows = Vec::with_capacity(results.len() + 5);
+    let mut last = None;
+    for (i, item) in results.iter().enumerate() {
+        let g = group(item);
+        if last != Some(g) {
+            rows.push(None);
+            last = Some(g);
+        }
+        rows.push(Some(i));
+    }
+    rows
+}
+
+/// Draw `rows` (from `grouped_rows`) around the cursor, recording each result row for
+/// mouse clicks. `heading` names the group of the result after a heading row.
+fn draw_grouped_list(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    rows: &[Option<usize>],
+    cursor: usize,
+    heading: impl Fn(usize) -> String,
+    mut line_for: impl FnMut(usize, &App) -> Line<'static>,
+) {
+    let visible = area.height as usize;
+    let cursor_row = rows.iter().position(|&r| r == Some(cursor)).unwrap_or(0);
+    let (start, end) = scroll_offset(cursor_row, rows.len(), visible);
+    let mut lines = Vec::new();
+    let mut hits = Vec::new();
+    for (offset, row) in rows[start..end].iter().enumerate() {
+        match *row {
+            Some(i) => {
+                hits.push((area.y + offset as u16, i));
+                lines.push(line_for(i, app));
+            }
+            None => {
+                // The heading names the group of the next result
+                let next = rows[start + offset + 1..].iter().flatten().next().copied();
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", next.map(&heading).unwrap_or_default()),
+                    Style::default().fg(C_INACTIVE).add_modifier(Modifier::BOLD),
+                )));
+            }
+        }
+    }
+    app.ui_bounds.rows = hits;
+    f.render_widget(Paragraph::new(lines), area);
+    if rows.len() > visible {
+        app.ui_bounds.scrollbar_rect = Some(Rect::new(
+            area.x + area.width.saturating_sub(1),
+            area.y,
+            1,
+            area.height,
+        ));
+        render_scrollbar(f, area, rows.len(), visible, start);
+    }
+}
+
+// ─── Search View ───────────────────────────────────────────────────────────
+fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
+    use crate::sources::{result_groups, ResultGroup};
+    if area.width < 5 || area.height < 3 {
+        return;
+    }
+
+    let input_line = Line::from(vec![
+        Span::styled("  Search library: ", Style::default().fg(C_ACCENT)),
+        Span::styled(app.search_query.clone(), Style::default().fg(C_FG)),
+        Span::styled(
+            if app.searching { "█" } else { "" },
+            Style::default().fg(C_ACCENT2),
+        ),
+    ]);
+    f.render_widget(
+        Paragraph::new(input_line),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    let chips_area = Rect::new(area.x, area.y + 1, area.width, 1);
+    let list_area = Rect::new(
+        area.x,
+        area.y + 2,
+        area.width,
+        area.height.saturating_sub(2),
+    );
+    if app.search_query.is_empty() {
+        return;
+    }
+    if app.search_all.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("  No results", Style::default().fg(C_RED))),
+            chips_area,
+        );
+        return;
+    }
+    let groups = result_groups(&app.search_all, ResultGroup::of_library);
+    f.render_widget(
+        Paragraph::new(scope_chips(&groups, app.search_scope)),
+        chips_area,
+    );
+
+    let rows = grouped_rows(&app.search_results, ResultGroup::of_library);
+    let width = list_area.width.saturating_sub(1) as usize;
+    let group_of: Vec<ResultGroup> = app
+        .search_results
+        .iter()
+        .map(ResultGroup::of_library)
+        .collect();
+    let cursor = app.search_cursor;
+    draw_grouped_list(
+        f,
+        app,
+        list_area,
+        &rows,
+        cursor,
+        |i| {
+            let g = group_of[i];
+            let n = groups
+                .iter()
+                .find(|&&(gg, _)| gg == g)
+                .map_or(0, |&(_, n)| n);
+            format!("{}  {}", g.label(), n)
+        },
+        |i, app| {
+            let entry = &app.search_results[i];
+            let style = if i == app.search_cursor {
+                Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C_FG)
+            };
+            let (icon, info) = match entry {
+                LibraryEntry::Directory { .. } => {
+                    let (tracks, secs) = entry.totals();
+                    (
+                        "📁 ",
+                        format!(
+                            "{} {}  ·  {}",
+                            tracks,
+                            if tracks == 1 { "track" } else { "tracks" },
+                            format_total(secs)
+                        ),
+                    )
+                }
+                LibraryEntry::Track { metadata, .. } => (
+                    "♪  ",
+                    metadata
+                        .duration
+                        .map(|d| format_secs(d.as_secs()))
+                        .unwrap_or_default(),
+                ),
+            };
+            let queued = match entry {
+                LibraryEntry::Track { path, .. } => app
+                    .playlist
+                    .entry_ids
+                    .contains(&crate::data::track::TrackRef::Local(path.clone())),
+                _ => false,
+            };
+            Line::from(vec![
+                Span::styled(
+                    if queued { "✓ " } else { "  " },
+                    Style::default().fg(C_GREEN),
+                ),
+                Span::styled(icon, style),
+                Span::styled(
+                    fit(entry.name(), width.saturating_sub(5 + 22).max(4)),
+                    style,
+                ),
+                Span::styled(fit_right(&info, 22), Style::default().fg(C_INACTIVE)),
+            ])
+        },
+    );
+}
+
 // ─── Remote Search View (Spotify / YouTube) ─────────────────────────────────
 fn draw_remote_search(f: &mut Frame, app: &mut App, area: Rect) {
+    use crate::sources::{result_groups, ResultGroup};
     if area.width < 5 || area.height < 2 {
         return;
     }
@@ -1395,17 +1837,21 @@ fn draw_remote_search(f: &mut Frame, app: &mut App, area: Rect) {
         ratatui::layout::Alignment::Left,
     );
 
-    let count_line = if view.loading {
-        format!("  Searching {}...", source_name)
-    } else {
-        format!("  {} results", view.search_results.len())
-    };
-    let count_widget = Paragraph::new(Line::from(Span::styled(
-        count_line,
-        Style::default().fg(C_DIM),
-    )))
-    .alignment(ratatui::layout::Alignment::Left);
-    f.render_widget(count_widget, chunks[1]);
+    let groups = result_groups(&view.search_all, ResultGroup::of_browse);
+    if view.loading {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  Searching {}...", source_name),
+                Style::default().fg(C_DIM),
+            )),
+            chunks[1],
+        );
+    } else if !view.search_all.is_empty() {
+        f.render_widget(
+            Paragraph::new(scope_chips(&groups, view.search_scope)),
+            chunks[1],
+        );
+    }
 
     let list_area = chunks[2];
     if list_area.height < 1 {
@@ -1424,41 +1870,119 @@ fn draw_remote_search(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let visible_height = list_area.height as usize;
-    let (start, end) = scroll_offset(
+    let rows = grouped_rows(&view.search_results, ResultGroup::of_browse);
+    let width = list_area.width as usize;
+    draw_grouped_list(
+        f,
+        app,
+        list_area,
+        &rows,
         view.search_cursor,
-        view.search_results.len(),
-        visible_height,
+        |i| {
+            let g = ResultGroup::of_browse(&view.search_results[i]);
+            let n = groups
+                .iter()
+                .find(|&&(gg, _)| gg == g)
+                .map_or(0, |&(_, n)| n);
+            format!("{}  {}", g.label(), n)
+        },
+        |i, app| {
+            let item = &view.search_results[i];
+            let line = browse_row(
+                item,
+                i == view.search_cursor,
+                &view.expanded,
+                &app.playlist,
+                width,
+            );
+            // Owned, so the line outlives this closure's borrow of the view
+            Line::from(
+                line.spans
+                    .into_iter()
+                    .map(|span| Span::styled(span.content.into_owned(), span.style))
+                    .collect::<Vec<_>>(),
+            )
+        },
     );
-    let mut display_lines = Vec::new();
-
-    for (idx, item) in view.search_results[start..end].iter().enumerate() {
-        display_lines.push(browse_row(
-            item,
-            start + idx == view.search_cursor,
-            &view.expanded,
-            &app.playlist,
-            list_area.width as usize,
-        ));
-    }
-
-    let widget = Paragraph::new(display_lines).alignment(ratatui::layout::Alignment::Left);
-    f.render_widget(widget, list_area);
-
-    if view.search_results.len() > visible_height {
-        render_scrollbar(
-            f,
-            list_area,
-            view.search_results.len(),
-            visible_height,
-            start,
-        );
-    }
 }
 
+/// Every key, by section, as listed in the help view.
+const HELP: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Navigation & Views",
+        &[
+            ("F2 - F6", "Switch views (Queue/Library/Now Playing/Search/Help)"),
+            ("Tab / B-Tab", "Cycle active panel / view"),
+            ("Tab (Search)", "Show the next group of results: Songs, Albums, ..."),
+            ("k j ↑ ↓", "Scroll / Navigate list items"),
+            ("q / Ctrl+C", "Quit application"),
+            ("Esc", "Back to the queue view"),
+            ("/ (Help)", "Filter this list of keys"),
+        ],
+    ),
+    (
+        "Music Sources (Local / Spotify / YouTube)",
+        &[
+            ("Ctrl+1 / Alt+1", "Switch to Local Library source"),
+            ("Ctrl+2 / Alt+2", "Switch to Spotify source (requires Premium)"),
+            ("c", "Spotify: own Client ID · YouTube: paste a cookie"),
+            ("Ctrl+3 / Alt+3", "Switch to YouTube Music source (stream via yt-dlp)"),
+            ("Ctrl+4 / Alt+4", "Switch to Unified Queue (mix tracks from any source)"),
+            ("Credentials", "Config stored in ~/.config/mixed/credentials.json"),
+            ("Lyrics", "Shown for all sources, found online"),
+        ],
+    ),
+    (
+        "Playback Controls",
+        &[
+            ("Space / p", "Play / Pause (restarts after a stop)"),
+            ("S", "Stop playback"),
+            ("n / l / →", "Next track (stays on the last one)"),
+            ("h / ←", "Previous track / restart after 3 s"),
+            ("a / d", "Seek backward / forward 5 seconds"),
+            ("+ / =", "Volume up"),
+            ("- / [", "Volume down"),
+            ("s", "Toggle shuffle mode"),
+            ("r", "Cycle repeat mode (off → track → queue)"),
+            ("R", "Radio of the selected or playing track, queued next"),
+        ],
+    ),
+    (
+        "Queue & Library Management",
+        &[
+            ("Enter", "Enqueue selected item / Play selected queue item"),
+            ("Alt + Enter", "Enqueue selected item and play immediately"),
+            ("Shift+Enter", "Enqueue selected track to play next"),
+            ("o ← →", "Toggle / Collapse/Expand directory tree in Library"),
+            ("Delete", "Remove selected track from the queue"),
+            ("Backspace", "Folder up (Library) / Clear queue"),
+            ("f / g", "Move selected queue item up / down"),
+            ("/", "Open search prompt to filter library"),
+        ],
+    ),
+    (
+        "Display & Lyrics",
+        &[
+            ("v", "Toggle spectrum/braille visualizer mode"),
+            ("m", "Toggle full lyrics / 3-line timed lyrics view"),
+            ("y", "Choose other lyrics (Now Playing)"),
+            ("Enter / Esc", "Lyrics list: use / close (/ to search)"),
+            ("b / B", "Search playing artist on Google in browser"),
+        ],
+    ),
+    (
+        "Mouse Interaction",
+        &[
+            ("Left Click", "Select item / Play (double-click) / Seek progress / Mini-controls / Search artist & song"),
+            ("Scroll Wheel", "Scroll Library, Queue, Search, or Lyrics smoothly"),
+        ],
+    ),
+];
+
 // ─── Help View ─────────────────────────────────────────────────────────────
-fn draw_help(f: &mut Frame, area: Rect) {
-    let help_text = vec![
+fn draw_help(f: &mut Frame, app: &App, area: Rect) {
+    let filter = app.help_filter.to_lowercase();
+    let mut help_text = vec![
         Line::from(vec![
             Span::styled(
                 "  mixed ",
@@ -1470,340 +1994,60 @@ fn draw_help(f: &mut Frame, area: Rect) {
             ),
             Span::styled("  —  Keyboard Shortcuts & Help", Style::default().fg(C_DIM)),
         ]),
-        Line::from(""),
-        // Navigation & Views
-        Line::from(Span::styled(
-            "  ── Navigation & Views ──",
-            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("F2 - F6", Style::default().fg(C_CYAN)),
-            Span::styled("      •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Switch views (Queue/Library/Now Playing/Search/Help)",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Tab / B-Tab", Style::default().fg(C_CYAN)),
-            Span::styled("  •  ", Style::default().fg(C_DIM)),
-            Span::styled("Cycle active panel / view", Style::default().fg(C_FG)),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("k / j / ↑ / ↓", Style::default().fg(C_CYAN)),
-            Span::styled("•  ", Style::default().fg(C_DIM)),
-            Span::styled("Scroll / Navigate list items", Style::default().fg(C_FG)),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("q / Ctrl+C", Style::default().fg(C_CYAN)),
-            Span::styled("   •  ", Style::default().fg(C_DIM)),
-            Span::styled("Quit application", Style::default().fg(C_FG)),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Esc", Style::default().fg(C_CYAN)),
-            Span::styled("          •  ", Style::default().fg(C_DIM)),
-            Span::styled("Back to the queue view", Style::default().fg(C_FG)),
-        ]),
-        Line::from(""),
-        // Music Sources (Streaming & Local)
-        Line::from(Span::styled(
-            "  ── Music Sources (Local / Spotify / YouTube) ──",
-            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Ctrl+1 / Alt+1", Style::default().fg(C_CYAN)),
-            Span::styled(" •  ", Style::default().fg(C_DIM)),
-            Span::styled("Switch to Local Library source", Style::default().fg(C_FG)),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Ctrl+2 / Alt+2", Style::default().fg(C_CYAN)),
-            Span::styled(" •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Switch to Spotify source (requires Premium)",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("c", Style::default().fg(C_CYAN)),
-            Span::styled("              •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Sign in with your own Spotify Client ID",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Ctrl+3 / Alt+3", Style::default().fg(C_CYAN)),
-            Span::styled(" •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Switch to YouTube Music source (stream via yt-dlp)",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Ctrl+4 / Alt+4", Style::default().fg(C_CYAN)),
-            Span::styled(" •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Switch to Unified Queue (mix tracks from any source)",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Credentials", Style::default().fg(C_CYAN)),
-            Span::styled("    •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Config stored in ~/.config/mixed/credentials.json",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Lyrics", Style::default().fg(C_CYAN)),
-            Span::styled("         •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Shown for all sources, found online",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(""),
-        // Playback Controls
-        Line::from(Span::styled(
-            "  ── Playback Controls ──",
-            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Space / p", Style::default().fg(C_CYAN)),
-            Span::styled("    •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Play / Pause (restarts after a stop)",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("S", Style::default().fg(C_CYAN)),
-            Span::styled("            •  ", Style::default().fg(C_DIM)),
-            Span::styled("Stop playback", Style::default().fg(C_FG)),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("n / l / →", Style::default().fg(C_CYAN)),
-            Span::styled("    •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Next track (stays on the last one)",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("h / ←", Style::default().fg(C_CYAN)),
-            Span::styled("        •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Previous track / restart after 3 s",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("a / d", Style::default().fg(C_CYAN)),
-            Span::styled("        •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Seek backward / forward 5 seconds",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("+ / =", Style::default().fg(C_CYAN)),
-            Span::styled("        •  ", Style::default().fg(C_DIM)),
-            Span::styled("Volume up", Style::default().fg(C_FG)),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("- / [", Style::default().fg(C_CYAN)),
-            Span::styled("        •  ", Style::default().fg(C_DIM)),
-            Span::styled("Volume down", Style::default().fg(C_FG)),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("s", Style::default().fg(C_CYAN)),
-            Span::styled("            •  ", Style::default().fg(C_DIM)),
-            Span::styled("Toggle shuffle mode", Style::default().fg(C_FG)),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("r", Style::default().fg(C_CYAN)),
-            Span::styled("            •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Cycle repeat mode (off → track → queue)",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(""),
-        // Queue & Library Management
-        Line::from(Span::styled(
-            "  ── Queue & Library Management ──",
-            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Enter", Style::default().fg(C_CYAN)),
-            Span::styled("        •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Enqueue selected item / Play selected queue item",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Alt + Enter", Style::default().fg(C_CYAN)),
-            Span::styled("  •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Enqueue selected item and play immediately",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Shift+Enter", Style::default().fg(C_CYAN)),
-            Span::styled("•  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Enqueue selected track to play next",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("o / Left/Right", Style::default().fg(C_CYAN)),
-            Span::styled("•  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Toggle / Collapse/Expand directory tree in Library",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Delete", Style::default().fg(C_CYAN)),
-            Span::styled("       •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Remove selected track from the queue",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Backspace", Style::default().fg(C_CYAN)),
-            Span::styled("    •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Folder up (Library) / Clear queue",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("f / g", Style::default().fg(C_CYAN)),
-            Span::styled("        •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Move selected queue item up / down",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("/", Style::default().fg(C_CYAN)),
-            Span::styled("            •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Open search prompt to filter library",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(""),
-        // Display & Lyrics
-        Line::from(Span::styled(
-            "  ── Display & Lyrics ──",
-            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("v", Style::default().fg(C_CYAN)),
-            Span::styled("            •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Toggle spectrum/braille visualizer mode",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("m", Style::default().fg(C_CYAN)),
-            Span::styled("            •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Toggle full lyrics / 3-line timed lyrics view",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("y", Style::default().fg(C_CYAN)),
-            Span::styled("            •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Choose other lyrics (Now Playing)",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Enter, /, Esc", Style::default().fg(C_CYAN)),
-            Span::styled("•  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Lyrics list: use / search / close",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("b / B", Style::default().fg(C_CYAN)),
-            Span::styled("        •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Search playing artist on Google in browser",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(""),
-        // Mouse Controls
-        Line::from(Span::styled(
-            "  ── Mouse Interaction ──",
-            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Left Click", Style::default().fg(C_CYAN)),
-            Span::styled("   •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Select item / Play (double-click) / Seek progress / Mini-controls / Search artist & song",
-                Style::default().fg(C_FG),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Scroll Wheel", Style::default().fg(C_CYAN)),
-            Span::styled(" •  ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Scroll Library, Queue, Search, or Lyrics smoothly",
-                Style::default().fg(C_FG),
-            ),
-        ]),
+        // The filter: typed after "/", kept after Enter
+        if app.help_filtering || !filter.is_empty() {
+            Line::from(vec![
+                Span::styled("  Filter keys: ", Style::default().fg(C_ACCENT)),
+                Span::styled(app.help_filter.clone(), Style::default().fg(C_FG)),
+                Span::styled(
+                    if app.help_filtering { "█" } else { "" },
+                    Style::default().fg(C_ACCENT2),
+                ),
+            ])
+        } else {
+            Line::from(Span::styled(
+                "  Press / to filter the keys",
+                Style::default().fg(C_INACTIVE),
+            ))
+        },
     ];
+
+    let mut shown = 0;
+    for (section, keys) in HELP {
+        let matching: Vec<_> = keys
+            .iter()
+            .filter(|(key, what)| {
+                filter.is_empty()
+                    || key.to_lowercase().contains(&filter)
+                    || what.to_lowercase().contains(&filter)
+                    || section.to_lowercase().contains(&filter)
+            })
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        shown += matching.len();
+        help_text.push(Line::from(""));
+        help_text.push(Line::from(Span::styled(
+            format!("  ── {} ──", section),
+            Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
+        )));
+        for (key, what) in matching {
+            help_text.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(fit(key, 14), Style::default().fg(C_CYAN)),
+                Span::styled(" •  ", Style::default().fg(C_DIM)),
+                Span::styled(*what, Style::default().fg(C_FG)),
+            ]));
+        }
+    }
+    if shown == 0 {
+        help_text.push(Line::from(""));
+        help_text.push(Line::from(Span::styled(
+            "  No key matches the filter.",
+            Style::default().fg(C_DIM),
+        )));
+    }
 
     let widget = Paragraph::new(help_text).alignment(ratatui::layout::Alignment::Left);
     f.render_widget(widget, area);

@@ -58,13 +58,22 @@ Full **MPRIS D-Bus** integration for Linux compositors (GNOME, KDE, Sway, Hyprla
 Intelligent, adaptive rendering powered by `crossbeam_channel::select!` multiplexing. The visualizer thread fires wake-up signals at **~30 fps** (34ms cadence) through a `bounded(1)` channel when music is playing. When idle, the FFT thread decays to silence and the main loop drops to **near 0% CPU** — no busy-waiting, no wasted cycles.
 
 ### 🎨 Native Terminal Theme Integration
-**mixed** inherits standard ANSI color palette codes and uses `Color::Reset` for default text. This means the player automatically respects and adapts to your terminal emulator's custom theme (e.g. Catppuccin, Gruvbox, Nord, Dracula) for a consistent, native desktop look.
+**mixed** draws text in your terminal's own foreground colour and its accents in your theme's ANSI palette, so it follows your terminal emulator's theme (e.g. Catppuccin, Gruvbox, Nord, Dracula) for a consistent, native desktop look. At startup, and again whenever its window regains focus, it asks the terminal for its actual colours and replaces any accent that would be hard to read on your background, so light themes and generated palettes stay readable too, and a theme changed while mixed runs is picked up when you come back to it.
+
+In kitty 0.40 and later, Hindi and other Indian scripts are drawn at their full width through kitty's text sizing protocol, instead of squeezed into single cells.
 
 ### 🖼 Sixel & Kitty Cover Art
 Album art is rendered directly in the terminal using high-performance image protocols (Sixel and Kitty Graphics Protocol) powered by `ratatui-image`. To see high-resolution cover art, use an image-enabled terminal emulator such as Kitty, WezTerm, Foot, Konsole, or Alacritty (v0.14+ with Sixel support enabled). The player automatically falls back to a text placeholder if image protocols are unsupported.
 
 ### 🎛️ Interactive Mini-Controls & Centered Layout
-A sleek, responsive transport widget (`[⏮  ▶/⏸  ⏭  +  -  ∅]`) is positioned directly beneath the album art in the left pane across the **Playlist (F2)**, **Library (F3)**, **Search (F5)**, and **Help (F6)** tabs. Both cover art and mini-controls are vertically centered together as a unified block in the middle of the left pane, featuring dedicated mouse hit targets for Previous, Play/Pause, Next, Volume adjustments, and Playlist clearing (`∅`).
+A sleek, responsive transport widget (`[⏮  ▶/⏸  ⏭  +  -  ∅]`) is positioned directly beneath the album art in the left pane across the **Playlist (F2)**, **Library (F3)**, **Search (F5)**, and **Help (F6)** tabs. Both cover art and mini-controls are vertically centered together as a unified block in the middle of the left pane, featuring dedicated mouse hit targets for Previous, Play/Pause, Next, Volume adjustments, and Playlist clearing (`∅`). Below them, a compact now-playing bar as wide as the cover shows the track, its progress (click to seek), shuffle, repeat and volume. The Track (F4) tab shows the cover alone.
+
+### 📋 Readable Lists
+- **Queue**: columns for position, title, artist, album, source (a coloured dot) and length. Tracks already played are dimmed, the playing one is marked with `▶` and the accent, and the selected row gets a soft background. The header says how many tracks and how much time are still to come.
+- **Library**: a breadcrumb (`Spotify › Playlists › Road Trip`) with the folder's track count and length; folders show theirs too, and queued items a `✓`.
+- **Search**: results are grouped into Songs, Albums, Artists and Playlists (Songs and Folders for local files), with a chip per group; `Tab` shows one group at a time.
+- **Track**: title, artist, album and year, and the format and quality of what plays (e.g. `FLAC · 16-bit · 44.1 kHz`, `Ogg Vorbis · 320 kbps` on Spotify).
+- **Hints**: each view shows one short row of its main keys; `F6` lists them all, and `/` there filters the list.
 
 ### 📜 Line-Free Visual Scrollbars
 Lists across the Playlist, Library, and Search views feature visual vertical scrollbars (`ratatui::widgets::Scrollbar`) when content overflows screen height. Designed with a clean, modern aesthetic: track lines and arrows are omitted, showing only the solid handle block (`█`) with full mouse click and drag seeking support.
@@ -81,7 +90,7 @@ Quickly explore artist discography, lyrics, or background information in your de
 ### 🎤 Lyrics for Every Source
 Lyrics are shown for local files, Spotify and YouTube Music alike, synced to the music where possible:
 - A track's own lyrics come first: a `.lrc` file next to a local song, or the lyrics in its tags.
-- Otherwise they are looked up online when the track starts: Spotify's own lyrics for Spotify tracks, then [Karalyr](https://www.karalyr.com) (word-by-word) and [LRCLIB](https://lrclib.net).
+- Otherwise they are looked up online when the track starts: Spotify's own lyrics for Spotify tracks, then [Karalyr](https://www.karalyr.com) (word-by-word), [LRCLIB](https://lrclib.net), [Better Lyrics](https://betterlyrics.org)' community lyrics and [LyricsPlus](https://github.com/ibratabian17/lyricsplus).
 - What is found is saved, as `Song.lrc` next to a local song or in the cache for streamed tracks, so each track is looked up once.
 - Press `y` in the **Track (F4)** view to choose different lyrics when the wrong ones were found. A `.lrc` file you made yourself is never replaced without asking.
 
@@ -90,8 +99,8 @@ See the [Lyrics guide](docs/lyrics.md) for details.
 ### 🌐 Multi-Source Streaming (Spotify, YouTube Music & Local)
 Seamlessly search, browse, enqueue, and play music across multiple sources in one unified player:
 - **Local Library (`Ctrl+1` / `Alt+1`)**: Zero-dependency offline audio playback for FLAC, MP3, WAV, and OGG files with embedded metadata and synchronized lyrics.
-- **Spotify (`Ctrl+2` / `Alt+2`)**: Search and library navigation (Liked Songs, Recently Played, Top Tracks, Playlists, Albums) with raw PCM playback powered by `librespot`, album names and cover art (requires Spotify Premium).
-- **YouTube Music (`Ctrl+3` / `Alt+3`)**: Search and browse YouTube Music tracks with background audio caching and 50% sequential prefetch via `yt-dlp`. Playback starts while the track is still downloading. Search works without an account; a browser cookie adds your own library and is used for downloads when YouTube asks for a signed-in session. `yt-dlp` needs a JavaScript runtime (Deno or Node.js).
+- **Spotify (`Ctrl+2` / `Alt+2`)**: Search and library navigation (Made for you, Liked Songs, Recently Played, Top Tracks, Playlists, Albums) with raw PCM playback powered by `librespot`, album names and cover art (requires Spotify Premium). Playlists Spotify makes (Daily Mix, Discover Weekly, radio, editorial playlists), which Spotify's Web API no longer gives to apps like `mixed`, are read through `librespot` the way the desktop app reads them.
+- **YouTube Music (`Ctrl+3` / `Alt+3`)**: Search and browse YouTube Music tracks with background audio caching and 50% sequential prefetch via `yt-dlp`. Tracks are streamed in pieces like YouTube Music apps do, so playback starts with the first piece and seeking is immediate; the audio URLs of the next tracks are found ahead of time. Search works without an account. `Enter` in the YouTube Library tab signs in through a browser window that only `mixed` uses, so the sign-in lasts instead of expiring like a copied cookie; it adds your own library and is used for downloads when YouTube asks for a signed-in session. `yt-dlp` needs a JavaScript runtime (Deno or Node.js).
 - **Unified Queue (`Ctrl+4` / `Alt+4`)**: Mix tracks from local files, Spotify, and YouTube in a single queue with automatic cross-source advancing. The queue, including remote tracks, is restored on the next launch.
 
 Remote libraries and search results are shown as a tree like the local library: `Enter` opens and closes albums, playlists and folders. Each source remembers its own tab and cursor. A track that fails to load is skipped, and playback stops after three failures in a row. Lyrics are shown for every source: from the song's own `.lrc` file or tags, from Spotify, or looked up online (see [Lyrics](docs/lyrics.md)).
@@ -111,7 +120,7 @@ Remote libraries and search results are shown as a tree like the local library: 
 For detailed instructions on configuring streaming sources, see the dedicated guides:
 - **[Spotify Setup & Authentication](docs/spotify.md)** — Sign in from the app, optionally with your own Client ID, and see what is stored and how playback connects.
 - **[Lyrics](docs/lyrics.md)** — Where lyrics come from, where they are saved, and how to choose other lyrics for a track.
-- **[YouTube Music Setup](docs/youtube.md)** — Install `yt-dlp` and a JavaScript runtime, set up `config.json`, optionally sign in with a browser cookie, and learn how caching and play-while-downloading work.
+- **[YouTube Music Setup](docs/youtube.md)** — Install `yt-dlp` and a JavaScript runtime, set up `config.json`, optionally sign in, and learn how caching and play-while-downloading work.
 
 ### Files & Configuration
 
@@ -123,6 +132,7 @@ For detailed instructions on configuring streaming sources, see the dedicated gu
 | `~/.config/mixed/credentials.json` | Spotify Client ID and tokens, YouTube cookie (owner-only permissions) |
 | `~/.config/mixed/yt_cookies_….txt` | The YouTube cookie in the format `yt-dlp` reads, written when a download needs it (owner-only permissions) |
 | `~/.local/share/mixed/state.json` | Saved queue and playback position |
+| `~/.local/share/mixed/youtube-browser/` | The browser profile of the YouTube sign-in window |
 | `~/.cache/mixed/yt/` | Downloaded YouTube audio (limited by `yt_cache_mb`, default 512 MB) |
 | `~/.cache/mixed/lyrics/` | Lyrics found online for Spotify and YouTube tracks |
 | `~/.cache/mixed/spotify/` | Spotify playback login and up to 1 GB of cached audio |
@@ -134,10 +144,10 @@ For detailed instructions on configuring streaming sources, see the dedicated gu
 You can download the pre-compiled binary for your system from the **[Releases](../../releases)** page.
 
 #### Linux (x86_64)
-1. Download `mixed-v1.7.0-x86_64-unknown-linux-gnu.tar.gz`.
+1. Download `mixed-v1.8.0-x86_64-unknown-linux-gnu.tar.gz`.
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v1.7.0-x86_64-unknown-linux-gnu.tar.gz
+   tar -xzf mixed-v1.8.0-x86_64-unknown-linux-gnu.tar.gz
    ```
 3. Move the `mixed` binary to your system PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -146,10 +156,10 @@ You can download the pre-compiled binary for your system from the **[Releases](.
 4. Run the player by typing `mixed` in your terminal.
 
 #### macOS (Apple Silicon or Intel)
-1. Download either `mixed-v1.7.0-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v1.7.0-x86_64-apple-darwin.tar.gz` (Intel).
+1. Download either `mixed-v1.8.0-aarch64-apple-darwin.tar.gz` (Apple Silicon) or `mixed-v1.8.0-x86_64-apple-darwin.tar.gz` (Intel).
 2. Extract the archive:
    ```bash
-   tar -xzf mixed-v1.7.0-*.tar.gz
+   tar -xzf mixed-v1.8.0-*.tar.gz
    ```
 3. Move `mixed` to a directory in your PATH (e.g. `/usr/local/bin`):
    ```bash
@@ -161,7 +171,7 @@ You can download the pre-compiled binary for your system from the **[Releases](.
    ```
 
 #### Windows (x86_64)
-1. Download `mixed-v1.7.0-x86_64-pc-windows-msvc.zip`.
+1. Download `mixed-v1.8.0-x86_64-pc-windows-msvc.zip`.
 2. Extract the `.zip` file.
 3. Move `mixed.exe` to a folder of your choice and run it in a terminal emulator (Windows Terminal, PowerShell, or Command Prompt).
 
@@ -233,9 +243,11 @@ mixed --play /path/to/song.flac
 | `-` / `[` | Volume down | Playback |
 | `s` | Toggle shuffle mode | Playback |
 | `r` | Cycle repeat mode (off → track → queue) | Playback |
+| `R` | Start the radio of the selected or playing Spotify / YouTube track: similar songs, queued after the current one | Playback |
 | `Enter` | Enqueue or dequeue selected item / Play selected queue item | Queue / Library / Search |
 | `Enter` | Open or close the selected album, playlist or folder; sign in when not connected | Spotify / YouTube |
-| `c` | Sign in with your own Spotify Client ID | Spotify Library |
+| `Enter` on "Add all N tracks" | Queue every track of the open folder (again: take them out) | Spotify / YouTube |
+| `c` | Sign in with your own Spotify Client ID / paste a YouTube cookie | Spotify / YouTube Library |
 | `Alt + Enter` | Enqueue selected item and play immediately | Library / Search |
 | `Shift + Enter` | Enqueue selected track or folder to play next | Library / Search |
 | `o` / `←` / `→` | Toggle / Collapse/Expand directory tree | Local Library |
@@ -244,6 +256,8 @@ mixed --play /path/to/song.flac
 | `Backspace` | Clear the entire queue (stops playback) | Queue |
 | `f` / `g` | Move selected queue item up / down | Queue |
 | `/` | Open search for the active source | Library |
+| `Tab` | Show the next group of results (All → Songs → Albums → …) | Search |
+| `/` | Filter the list of keys (`Enter` keeps the filter, `Esc` clears it) | Help |
 | `v` | Toggle spectrum/braille visualizer mode | Display |
 | `m` | Toggle full lyrics / 3-line timed lyrics view | Display |
 | `y` | Choose other lyrics for the playing track | Now Playing |

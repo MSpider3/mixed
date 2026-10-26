@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ui::theme::{C_ACCENT, C_ACCENT2, C_CYAN, C_DIM, C_FG, C_GREEN};
 
@@ -91,6 +91,43 @@ pub fn truncate_to_width(text: &str, max_width: usize) -> &str {
     text
 }
 
+/// `text` in exactly `width` cells: cut with "…" when longer, padded when shorter.
+pub fn fit(text: &str, width: usize) -> String {
+    let w = text.width();
+    if w <= width {
+        return format!("{}{}", text, " ".repeat(width - w));
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let cut = truncate_to_width(text, width - 1);
+    format!("{}…{}", cut, " ".repeat(width - 1 - cut.width()))
+}
+
+/// `text` right-aligned in `width` cells (cut like `fit` when longer).
+pub fn fit_right(text: &str, width: usize) -> String {
+    let w = text.width();
+    if w >= width {
+        return fit(text, width);
+    }
+    format!("{}{}", " ".repeat(width - w), text)
+}
+
+/// A total length such as "52 min" or "3h 5m".
+pub fn format_total(secs: u64) -> String {
+    let (hours, mins) = (secs / 3600, (secs % 3600) / 60);
+    if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{} min", mins)
+    }
+}
+
+/// A track length such as "4:04".
+pub fn format_secs(secs: u64) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +140,17 @@ mod tests {
         assert_eq!(scroll_offset(2, 5, 10), (0, 5));
         // Scrolled midway
         assert_eq!(scroll_offset(10, 20, 6), (7, 13));
+    }
+
+    #[test]
+    fn columns_are_cut_and_padded_to_their_width() {
+        assert_eq!(fit("Raabta", 8), "Raabta  ");
+        assert_eq!(fit("Dancing With A Stranger", 8), "Dancing…");
+        assert_eq!(fit("夜に駆ける", 6), "夜に… ");
+        assert_eq!(fit_right("4:04", 6), "  4:04");
+        assert_eq!(format_total(52 * 60 + 10), "52 min");
+        assert_eq!(format_total(3 * 3600 + 5 * 60), "3h 5m");
+        assert_eq!(format_secs(244), "4:04");
     }
 
     #[test]

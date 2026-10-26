@@ -50,6 +50,19 @@ impl LibraryEntry {
         matches!(self, LibraryEntry::Directory { .. })
     }
 
+    /// How many tracks are under this entry, and their total length in seconds.
+    pub fn totals(&self) -> (usize, u64) {
+        match self {
+            LibraryEntry::Track { metadata, .. } => {
+                (1, metadata.duration.map_or(0, |d| d.as_secs()))
+            }
+            LibraryEntry::Directory { children, .. } => children
+                .iter()
+                .map(LibraryEntry::totals)
+                .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1)),
+        }
+    }
+
     /// Returns all audio file paths under this entry recursively.
     pub fn get_all_files(&self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
@@ -162,6 +175,9 @@ pub struct FlatLibraryItem {
     /// the playlist. Cached here so `draw_library` never calls `get_all_files()`
     /// in the render hot-path (was O(N×depth) per visible row per frame).
     pub enqueued: bool,
+    /// Tracks under this item and their total length in seconds (see `LibraryEntry::totals`).
+    pub tracks: usize,
+    pub duration_secs: u64,
 }
 
 /// Intermediate entry collected during the WalkDir phase (Phase 1).
@@ -320,6 +336,7 @@ pub fn flatten_library(
         // Pre-compute enqueue status — O(N_tracks_in_subtree) but only during
         // rebuild (on library/playlist change), not on every render frame.
         let enqueued = entry.all_tracks_enqueued(entry_ids);
+        let (tracks, duration_secs) = entry.totals();
 
         result.push(FlatLibraryItem {
             entry: entry.clone(),
@@ -327,6 +344,8 @@ pub fn flatten_library(
             is_last,
             ancestor_last: current_ancestors.clone(),
             enqueued,
+            tracks,
+            duration_secs,
         });
 
         if let LibraryEntry::Directory { path, children, .. } = entry {

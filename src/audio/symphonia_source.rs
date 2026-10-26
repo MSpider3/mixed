@@ -102,6 +102,15 @@ impl SymphoniaSource {
         Self::from_media_source(Box::new(source), ext)
     }
 
+    /// Decode a stream fetched in pieces (see `range_stream`).
+    #[cfg(feature = "youtube")]
+    pub fn open_stream(
+        reader: crate::audio::range_stream::RangeStream,
+        extension: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::from_media_source(Box::new(reader), extension)
+    }
+
     /// Probes `source` (using `extension` as a format hint) and prepares the decoder.
     fn from_media_source(
         source: Box<dyn MediaSource>,

@@ -1,6 +1,6 @@
 [package]
 name = "mixed"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 description = "A next-generation terminal music player written in Rust"
 license = "GPL-3.0"
@@ -47,7 +47,7 @@ directories = "6"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Signal handling
-ctrlc = "3"
+ctrlc = { version = "3", features = ["termination"] }
 
 # Fuzzy search
 fuzzy-matcher = "0.3"

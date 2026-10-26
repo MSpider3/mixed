@@ -113,8 +113,18 @@ pub struct App {
     // -- Search --
     pub searching: bool,
     pub search_query: String,
+    /// What is shown of `search_all`: the current scope's results, grouped.
     pub search_results: Vec<LibraryEntry>,
     pub search_cursor: usize,
+    /// Every result of the local search, best match first.
+    pub search_all: Vec<LibraryEntry>,
+    /// Which group of local results is shown; `None` shows them all.
+    pub search_scope: Option<crate::sources::ResultGroup>,
+    /// The help view's filter, while one is typed or kept.
+    pub help_filter: String,
+    pub help_filtering: bool,
+    /// Format and quality of the playing audio, e.g. "FLAC · 16-bit · 44.1 kHz".
+    pub audio_summary: Option<String>,
 
     // -- Lyrics --
     pub current_lyrics: Option<LyricsData>,
@@ -204,6 +214,8 @@ pub struct UiBounds {
     pub footer_source_rect: Option<ratatui::layout::Rect>,
     pub footer_tabs_rect: Option<ratatui::layout::Rect>,
     pub scrollbar_rect: Option<ratatui::layout::Rect>,
+    /// The list rows on screen: their y and the cursor position each one selects.
+    pub rows: Vec<(u16, usize)>,
 }
 
 impl UiBounds {
@@ -216,6 +228,7 @@ impl UiBounds {
         self.footer_source_rect = None;
         self.footer_tabs_rect = None;
         self.scrollbar_rect = None;
+        self.rows.clear();
     }
 }
 
@@ -274,6 +287,11 @@ impl App {
             search_query: String::new(),
             search_results: Vec::new(),
             search_cursor: 0,
+            search_all: Vec::new(),
+            search_scope: None,
+            help_filter: String::new(),
+            help_filtering: false,
+            audio_summary: None,
             current_lyrics: None,
             current_plain_lyrics: None,
             lyrics_searching: false,
@@ -603,6 +621,7 @@ impl App {
             view.search_query = query.clone();
             if query.trim().is_empty() {
                 view.search_results.clear();
+                view.search_all.clear();
                 view.loading = false;
                 view.search_cursor = 0;
                 self.refresh_needed = true;
@@ -637,6 +656,15 @@ impl App {
     /// Load the current YouTube track's audio (complete or still downloading).
     fn load_youtube_audio(&mut self, input: crate::audio::player::PlayInput) {
         self.buffering = false;
+        self.audio_summary = match &input {
+            crate::audio::player::PlayInput::File(path)
+            | crate::audio::player::PlayInput::Growing { path, .. }
+            // Not saved yet: the format, from the extension
+            | crate::audio::player::PlayInput::Stream { save_to: path, .. } => {
+                metadata::audio_summary(path)
+            }
+            _ => None,
+        };
         self.streaming = None;
         let duration_ms = self
             .playlist
@@ -708,18 +736,7 @@ impl App {
                     if pending_id == parent_id {
                         let tracks: Vec<(TrackRef, TrackMetadata)> = items
                             .into_iter()
-                            .filter_map(|it| {
-                                let tr = it.track_ref?;
-                                let meta = TrackMetadata {
-                                    title: Some(it.title),
-                                    artist: it.subtitle,
-                                    album: it.album,
-                                    duration: it.duration_secs.map(std::time::Duration::from_secs),
-                                    cover_url: it.artwork_url,
-                                    ..Default::default()
-                                };
-                                Some((tr, meta))
-                            })
+                            .filter_map(crate::sources::BrowseItem::queue_entry)
                             .collect();
                         if !tracks.is_empty() {
                             let count = tracks.len();
@@ -743,14 +760,16 @@ impl App {
                 if let Some(view) = self.source_view_mut(source) {
                     if view.search_generation == generation {
                         if page == 0 {
-                            view.search_results = items;
-                            view.search_cursor = 0;
+                            view.search_all = items;
+                            view.search_results.clear();
+                            view.arrange_search();
                             // Expansions inside the replaced results no longer exist
                             let flat = &view.flat;
                             view.expanded
                                 .retain(|id| flat.iter().any(|it| &it.id == id));
                         } else {
-                            view.search_results.extend(items);
+                            view.search_all.extend(items);
+                            view.arrange_search();
                         }
                         view.loading = false;
                         self.refresh_needed = true;
@@ -763,6 +782,21 @@ impl App {
             SourceEvent::LyricsMatches { track, result } => {
                 self.handle_lyrics_matches(track, result)
             }
+            SourceEvent::YouTubeTrackUrl { video_id, url, ext } => {
+                if self.awaiting_youtube_download(&video_id) {
+                    let save_to = crate::sources::ytdlp::YtDlp::cache_dir()
+                        .join(format!("{}.{}", video_id, ext));
+                    self.load_youtube_audio(crate::audio::player::PlayInput::Stream {
+                        url,
+                        save_to,
+                    });
+                    self.refresh_needed = true;
+                }
+            }
+            SourceEvent::Radio { seed, result } => {
+                self.radio_loaded(seed, result);
+                self.refresh_needed = true;
+            }
             SourceEvent::CoverFetched { .. } => {
                 self.generate_cover_art_protocol();
                 #[cfg(target_os = "linux")]
@@ -774,6 +808,14 @@ impl App {
                 // absorbs the foreground request, so its generation is not ours.
                 if self.awaiting_youtube_download(&video_id) {
                     self.load_youtube_audio(crate::audio::player::PlayInput::File(path));
+                    self.refresh_needed = true;
+                } else if self
+                    .streaming
+                    .as_ref()
+                    .is_some_and(|st| st.video_id == video_id)
+                {
+                    // Playing while it downloaded: the whole file tells its quality
+                    self.audio_summary = metadata::audio_summary(&path);
                     self.refresh_needed = true;
                 }
             }
@@ -942,12 +984,15 @@ impl App {
             .into_iter()
             .map(|entry| {
                 let enqueued = entry.all_tracks_enqueued(&self.playlist.entry_ids);
+                let (tracks, duration_secs) = entry.totals();
                 library::FlatLibraryItem {
                     entry,
                     depth: 0,
                     is_last: false,
                     ancestor_last: Vec::new(),
                     enqueued,
+                    tracks,
+                    duration_secs,
                 }
             })
             .collect();
@@ -990,14 +1035,15 @@ impl App {
     pub fn load_session(&mut self) {
         if let Some(state) = session::load_session() {
             // Rebuild playlist from saved entries if present, else fallback to legacy paths
+            // Where the saved current track lands once missing files are left out
+            let mut current = state.current_index;
             if !state.queue.is_empty() {
-                for entry in state.queue {
-                    if let Some(path) = entry.id.local_path() {
-                        if path.exists() {
-                            self.playlist.add(entry.id, entry.metadata);
-                        }
-                    } else {
-                        // Remote tracks restored without network calls
+                for (index, entry) in state.queue.into_iter().enumerate() {
+                    if index == state.current_index {
+                        current = self.playlist.len();
+                    }
+                    // Remote tracks are restored without network calls
+                    if entry.id.local_path().is_none_or(|path| path.exists()) {
                         self.playlist.add(entry.id, entry.metadata);
                     }
                 }
@@ -1015,7 +1061,7 @@ impl App {
             }
 
             if !self.playlist.is_empty() {
-                self.playlist.current = state.current_index.min(self.playlist.len() - 1);
+                self.playlist.current = current.min(self.playlist.len() - 1);
                 self.playlist.repeat = state.repeat_mode;
                 self.playlist.set_shuffle(state.shuffle);
                 if let Some(p) = self.player.as_mut() {
@@ -1069,6 +1115,14 @@ impl App {
                         self.push_mpris_playback();
                         self.active_panel = ActivePanel::NowPlaying;
                         self.refresh_needed = true;
+                    } else if !entry.id.is_local() {
+                        // A streamed track is not loaded at startup: show it, and let
+                        // Play start it (it begins from the start).
+                        self.stopped = true;
+                        self.set_now_playing_meta();
+                        self.generate_cover_art_protocol();
+                        self.push_mpris_metadata();
+                        self.refresh_needed = true;
                     }
                 }
             }
@@ -1093,6 +1147,13 @@ impl App {
     /// Set the now-playing metadata from current playlist entry.
     fn set_now_playing_meta(&mut self) {
         self.now_playing_meta = self.playlist.current_entry().map(|e| e.metadata.clone());
+        self.audio_summary = match self.playlist.current_entry().map(|e| &e.id) {
+            Some(TrackRef::Local(path)) => metadata::audio_summary(path),
+            // The quality the Spotify player asks for (see spotify_backend)
+            Some(TrackRef::Spotify(_)) => Some("Ogg Vorbis · 320 kbps".to_string()),
+            // Known once its download starts (see load_youtube_audio)
+            _ => None,
+        };
     }
 
     pub fn generate_cover_art_protocol(&mut self) {
@@ -1209,6 +1270,8 @@ impl App {
         self.last_lyric_line = None;
         self.force_terminal_clear = true;
         let current_track = self.playlist.current_entry().map(|e| e.id.clone());
+        // Whatever plays now, the YouTube tracks after it get ready
+        self.prepare_upcoming_youtube();
         if let Some(track_ref) = current_track {
             match track_ref {
                 TrackRef::Local(path) => {
@@ -1337,7 +1400,7 @@ impl App {
                         self.load_generation = next_gen;
                         if let Some(ref runtime) = self.source_runtime {
                             let _ =
-                                runtime.send(crate::sources::SourceRequest::DownloadYouTubeTrack {
+                                runtime.send(crate::sources::SourceRequest::StreamYouTubeTrack {
                                     video_id: vid.clone(),
                                     generation: next_gen,
                                 });
@@ -2085,7 +2148,13 @@ impl App {
                             });
                         }
                     } else {
-                        view.awaiting_login_input = true;
+                        // A browser window that only mixed uses; `c` pastes a cookie instead
+                        view.loading = true;
+                        view.error = None;
+                        view.login_status = Some("Opening a browser window…".to_string());
+                        if let Some(ref rt) = self.source_runtime {
+                            let _ = rt.send(crate::sources::SourceRequest::BrowserLogin(source));
+                        }
                     }
                     (None, true)
                 } else {
@@ -2101,6 +2170,18 @@ impl App {
             return;
         }
 
+        // The "add all" row of an open folder stands for the folder itself
+        let item = item.map(
+            |item| match item.id.strip_prefix(crate::sources::ADD_ALL_PREFIX) {
+                Some(folder) => crate::sources::BrowseItem {
+                    id: folder.to_string(),
+                    is_container: true,
+                    ..item
+                },
+                None => item,
+            },
+        );
+
         if let Some(item) = item {
             if item.is_container {
                 // If container tracks are cached, enqueue them immediately
@@ -2110,28 +2191,24 @@ impl App {
                     .map(|children| {
                         children
                             .iter()
-                            .filter_map(|child| {
-                                let tr = child.track_ref.clone()?;
-                                let meta = TrackMetadata {
-                                    title: Some(child.title.clone()),
-                                    artist: child.subtitle.clone(),
-                                    album: child.album.clone(),
-                                    duration: child
-                                        .duration_secs
-                                        .map(std::time::Duration::from_secs),
-                                    cover_url: child.artwork_url.clone(),
-                                    ..Default::default()
-                                };
-                                Some((tr, meta))
-                            })
+                            .cloned()
+                            .filter_map(crate::sources::BrowseItem::queue_entry)
                             .collect()
                     })
                     .unwrap_or_default();
 
                 if !tracks_in_cache.is_empty() {
                     let count = tracks_in_cache.len();
+                    // Enter on a folder whose tracks are all queued takes them out again
+                    let all_queued = tracks_in_cache
+                        .iter()
+                        .all(|(id, _)| self.playlist.entry_ids.contains(id));
                     self.toggle_enqueue_tracks(&tracks_in_cache, play_now);
-                    self.set_status(format!("Enqueued {} tracks", count));
+                    self.set_status(if all_queued {
+                        format!("Removed {} tracks from the queue", count)
+                    } else {
+                        format!("Enqueued {} tracks", count)
+                    });
                 } else {
                     self.set_status(format!("Loading tracks for {}...", item.title));
                     self.pending_container_enqueue = Some((item.id.clone(), play_now));
@@ -2144,15 +2221,7 @@ impl App {
                     }
                 }
                 self.refresh_needed = true;
-            } else if let Some(tr) = item.track_ref {
-                let meta = crate::data::metadata::TrackMetadata {
-                    title: Some(item.title),
-                    artist: item.subtitle,
-                    album: item.album,
-                    duration: item.duration_secs.map(std::time::Duration::from_secs),
-                    cover_url: item.artwork_url.clone(),
-                    ..Default::default()
-                };
+            } else if let Some((tr, meta)) = item.queue_entry() {
                 if play_next {
                     let was_empty = self.playlist.is_empty();
                     if !self.playlist.entry_ids.contains(&tr) {
@@ -2170,11 +2239,126 @@ impl App {
         self.refresh_needed = true;
     }
 
+    /// Find the audio URLs of the next YouTube tracks in the play order that are not
+    /// cached, so that skipping to them starts at once.
+    fn prepare_upcoming_youtube(&self) {
+        const AHEAD: usize = 3;
+        let start = self.playlist.current + 1;
+        let video_ids: Vec<String> = self
+            .playlist
+            .play_order
+            .iter()
+            .skip(start)
+            .filter_map(|&i| match &self.playlist.entries.get(i)?.id {
+                TrackRef::YouTube(vid) => Some(vid.clone()),
+                _ => None,
+            })
+            .filter(|vid| crate::sources::ytdlp::YtDlp::find_cached(vid).is_none())
+            .take(AHEAD)
+            .collect();
+        if let (false, Some(rt)) = (video_ids.is_empty(), self.source_runtime.as_ref()) {
+            let _ = rt.send(crate::sources::SourceRequest::PrepareYouTubeTracks { video_ids });
+        }
+    }
+
+    /// The track a radio would start from: the selected one, or the playing one in
+    /// the Now Playing view.
+    fn radio_seed(&self) -> Option<(TrackRef, String)> {
+        let entry_seed = |entry: &crate::data::playlist::PlaylistEntry| {
+            (
+                entry.id.clone(),
+                entry
+                    .metadata
+                    .display_title(self.config.strip_track_numbers)
+                    .to_string(),
+            )
+        };
+        match self.active_panel {
+            ActivePanel::NowPlaying => self.playlist.current_entry().map(entry_seed),
+            ActivePanel::Queue => self.playlist.entries.get(self.queue_cursor).map(entry_seed),
+            ActivePanel::Library | ActivePanel::Search => {
+                let view = self.active_source_view()?;
+                let item = if self.active_panel == ActivePanel::Search {
+                    view.search_results.get(view.search_cursor)
+                } else {
+                    view.flat.get(view.cursor)
+                }?;
+                Some((item.track_ref.clone()?, item.title.clone()))
+            }
+            ActivePanel::Help => None,
+        }
+    }
+
+    /// Ask for the radio of the selected track (`R`).
+    pub fn start_radio(&mut self) {
+        self.refresh_needed = true;
+        let Some((seed, title)) = self.radio_seed() else {
+            self.set_status("Select a Spotify or YouTube track to start its radio");
+            return;
+        };
+        if seed.is_local() {
+            self.set_status("Radio works with Spotify and YouTube tracks");
+            return;
+        }
+        if let Some(ref rt) = self.source_runtime {
+            let _ = rt.send(crate::sources::SourceRequest::Radio { seed });
+            self.set_status(format!("Starting the radio of {}…", title));
+        }
+    }
+
+    /// Queue a radio's tracks right after the playing one (or start it when nothing
+    /// plays). Tracks already in the queue are left where they are.
+    fn radio_loaded(
+        &mut self,
+        seed: TrackRef,
+        result: Result<Vec<crate::sources::BrowseItem>, String>,
+    ) {
+        let items = match result {
+            Ok(items) => items,
+            Err(e) => {
+                self.set_status(format!("Error: {}", e));
+                return;
+            }
+        };
+        let tracks: Vec<_> = items
+            .into_iter()
+            .filter_map(crate::sources::BrowseItem::queue_entry)
+            .filter(|(id, _)| !self.playlist.entry_ids.contains(id))
+            .collect();
+        if tracks.is_empty() {
+            self.set_status("The radio holds no tracks that are not queued already");
+            return;
+        }
+        let count = tracks.len();
+        if self.playlist.is_empty() {
+            for (id, meta) in tracks {
+                self.playlist.add(id, meta);
+            }
+            self.playlist.current = 0;
+            self.play_current();
+        } else {
+            // In reverse, so that the radio keeps its order after the current track
+            for (id, meta) in tracks.into_iter().rev() {
+                self.playlist.play_next(id, meta);
+            }
+        }
+        let source = match seed {
+            TrackRef::Spotify(_) => "Spotify",
+            _ => "YouTube Music",
+        };
+        self.set_status(format!(
+            "Radio: {} tracks from {} queued next",
+            count, source
+        ));
+        self.rebuild_flat_library_view();
+    }
+
     /// Run fuzzy search against the flat library.
     pub fn run_search(&mut self) {
         self.refresh_needed = true;
         if self.search_query.is_empty() {
             self.search_results.clear();
+            self.search_all.clear();
             self.search_cursor = 0;
             return;
         }
@@ -2191,7 +2375,29 @@ impl App {
             .collect();
 
         scored.sort_by_key(|b| std::cmp::Reverse(b.0));
-        self.search_results = scored.into_iter().map(|(_, e)| e).collect();
+        self.search_all = scored.into_iter().map(|(_, e)| e).collect();
+        self.search_results = crate::sources::arrange_results(
+            &self.search_all,
+            self.search_scope,
+            crate::sources::ResultGroup::of_library,
+        );
+        self.search_cursor = 0;
+    }
+
+    /// Show the next group of search results (Tab in the search view): all, then each group.
+    pub fn cycle_search_scope(&mut self) {
+        use crate::sources::{arrange_results, next_scope, result_groups, ResultGroup};
+        self.refresh_needed = true;
+        if let Some(view) = self.active_source_view_mut() {
+            let groups = result_groups(&view.search_all, ResultGroup::of_browse);
+            view.search_scope = next_scope(view.search_scope, &groups);
+            view.arrange_search();
+            return;
+        }
+        let groups = result_groups(&self.search_all, ResultGroup::of_library);
+        self.search_scope = next_scope(self.search_scope, &groups);
+        self.search_results =
+            arrange_results(&self.search_all, self.search_scope, ResultGroup::of_library);
         self.search_cursor = 0;
     }
 

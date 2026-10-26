@@ -11,8 +11,10 @@ For every track that starts playing, the first of these that has lyrics is used:
 3. Spotify tracks only: Spotify's own lyrics.
 4. [Karalyr](https://www.karalyr.com), which has word-by-word synced lyrics for a small number of songs.
 5. [LRCLIB](https://lrclib.net), which has line-synced or plain lyrics for most songs.
+6. [Better Lyrics](https://betterlyrics.org)' community database (Unison), with word-synced lyrics for some songs. Better Lyrics' main lyrics service needs a check in a web browser, so `mixed` cannot use it.
+7. [LyricsPlus](https://github.com/ibratabian17/lyricsplus), which collects lyrics from Apple Music, Musixmatch, QQ Music and others, often word-synced. Its public server is run by one person and may be slow or busy.
 
-Steps 3 to 5 send the track's title, artist, album and length to that service. Synced lyrics are preferred; plain text is shown when nothing synced exists. Lyrics found online are saved, so each track is looked up once.
+Steps 3 to 7 send the track's title, artist, album and length to that service. Synced lyrics are preferred; plain text is shown when nothing synced exists. Lyrics found online are saved, so each track is looked up once.
 
 ## Where lyrics are saved
 

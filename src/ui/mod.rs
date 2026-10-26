@@ -1,6 +1,7 @@
 pub mod artwork;
 pub mod branding;
 pub mod events;
+pub mod kitty_text;
 pub mod layout;
 pub mod lyrics_widget;
 pub mod theme;

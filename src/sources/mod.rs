@@ -4,8 +4,12 @@ pub mod lyrics;
 pub mod runtime;
 pub mod spotify;
 #[cfg(feature = "spotify")]
+pub mod spotify_catalog;
+#[cfg(feature = "spotify")]
 pub mod spotify_oauth;
 pub mod youtube;
+#[cfg(feature = "youtube")]
+pub mod youtube_login;
 pub mod ytdlp;
 
 use crate::data::track::TrackRef;
@@ -67,6 +71,86 @@ pub enum BrowseItemKind {
     Playlist,
 }
 
+/// The sections of a search result list, in the order they are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ResultGroup {
+    Songs,
+    Albums,
+    Artists,
+    Playlists,
+    Folders,
+}
+
+impl ResultGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            ResultGroup::Songs => "Songs",
+            ResultGroup::Albums => "Albums",
+            ResultGroup::Artists => "Artists",
+            ResultGroup::Playlists => "Playlists",
+            ResultGroup::Folders => "Folders",
+        }
+    }
+
+    pub fn of_browse(item: &BrowseItem) -> Self {
+        match item.kind {
+            BrowseItemKind::Track => ResultGroup::Songs,
+            BrowseItemKind::Album => ResultGroup::Albums,
+            BrowseItemKind::Artist => ResultGroup::Artists,
+            BrowseItemKind::Playlist => ResultGroup::Playlists,
+        }
+    }
+
+    pub fn of_library(entry: &crate::data::library::LibraryEntry) -> Self {
+        if entry.is_dir() {
+            ResultGroup::Folders
+        } else {
+            ResultGroup::Songs
+        }
+    }
+}
+
+/// The results `scope` lets through (all of them for `None`), grouped in
+/// `ResultGroup` order. Each group keeps the order the search ranked them in.
+pub fn arrange_results<T: Clone>(
+    all: &[T],
+    scope: Option<ResultGroup>,
+    group: impl Fn(&T) -> ResultGroup,
+) -> Vec<T> {
+    let mut shown: Vec<T> = all
+        .iter()
+        .filter(|item| scope.is_none_or(|s| group(item) == s))
+        .cloned()
+        .collect();
+    shown.sort_by_key(|item| group(item));
+    shown
+}
+
+/// The groups among `all`, in display order, with how many results each holds.
+pub fn result_groups<T>(all: &[T], group: impl Fn(&T) -> ResultGroup) -> Vec<(ResultGroup, usize)> {
+    let mut counts: Vec<(ResultGroup, usize)> = Vec::new();
+    for g in all.iter().map(group) {
+        match counts.iter_mut().find(|(seen, _)| *seen == g) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((g, 1)),
+        }
+    }
+    counts.sort_by_key(|&(g, _)| g);
+    counts
+}
+
+/// The scope after `scope` when cycling: all results, then each group present.
+pub fn next_scope(
+    scope: Option<ResultGroup>,
+    present: &[(ResultGroup, usize)],
+) -> Option<ResultGroup> {
+    let order: Vec<Option<ResultGroup>> = std::iter::once(None)
+        .chain(present.iter().map(|&(g, _)| Some(g)))
+        .collect();
+    let at = order.iter().position(|&s| s == scope).unwrap_or(0);
+    order[(at + 1) % order.len()]
+}
+
 /// A generic browse item shared across local, Spotify, and YouTube sources.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowseItem {
@@ -82,6 +166,24 @@ pub struct BrowseItem {
     pub album: Option<String>,
     /// Nesting level in a browse tree: 0 for roots, parent depth + 1 for children.
     pub depth: usize,
+}
+
+impl BrowseItem {
+    /// The queue entry for a track row; `None` for folders.
+    pub fn queue_entry(self) -> Option<(TrackRef, crate::data::metadata::TrackMetadata)> {
+        let track = self.track_ref?;
+        Some((
+            track,
+            crate::data::metadata::TrackMetadata {
+                title: Some(self.title),
+                artist: self.subtitle,
+                album: self.album,
+                duration: self.duration_secs.map(std::time::Duration::from_secs),
+                cover_url: self.artwork_url,
+                ..Default::default()
+            },
+        ))
+    }
 }
 
 /// State for a directory level in the navigation stack ("cd" / "cd ..").
@@ -110,7 +212,12 @@ pub struct SourceView {
     pub loading: bool,
     pub error: Option<String>,
     pub search_query: String,
+    /// What is shown of `search_all`: the current scope's results, grouped.
     pub search_results: Vec<BrowseItem>,
+    /// Every result of the current search, as the source ranked them.
+    pub search_all: Vec<BrowseItem>,
+    /// Which group of results is shown; `None` shows them all.
+    pub search_scope: Option<ResultGroup>,
     pub search_generation: u64,
     pub next_page: usize,
     pub login_input: String,
@@ -119,7 +226,47 @@ pub struct SourceView {
     pub login_status: Option<String>,
 }
 
+/// Id prefix of the "add all tracks" row at the top of an open folder; the rest is the
+/// folder's id.
+pub const ADD_ALL_PREFIX: &str = "add_all:";
+
+/// The rows of an open folder: its children, after an "add all tracks" row when it
+/// holds any track.
+fn folder_rows(folder_id: &str, children: &[BrowseItem]) -> Vec<BrowseItem> {
+    let tracks = children.iter().filter(|c| c.track_ref.is_some()).count();
+    let mut rows = Vec::with_capacity(children.len() + 1);
+    if tracks > 0 {
+        rows.push(BrowseItem {
+            id: format!("{}{}", ADD_ALL_PREFIX, folder_id),
+            title: format!("Add all {} tracks", tracks),
+            subtitle: None,
+            kind: BrowseItemKind::Playlist,
+            is_container: false,
+            track_ref: None,
+            duration_secs: None,
+            artwork_url: None,
+            album: None,
+            depth: 0,
+        });
+    }
+    rows.extend_from_slice(children);
+    rows
+}
+
 impl SourceView {
+    /// Show what the scope lets through of `search_all`, keeping the cursor on its item.
+    pub fn arrange_search(&mut self) {
+        let selected = self
+            .search_results
+            .get(self.search_cursor)
+            .map(|item| item.id.clone());
+        self.search_results =
+            arrange_results(&self.search_all, self.search_scope, ResultGroup::of_browse);
+        self.search_cursor = selected
+            .and_then(|id| self.search_results.iter().position(|item| item.id == id))
+            .unwrap_or(0);
+    }
+
     /// Returns the breadcrumb string for the current navigation state.
     pub fn current_path_display(&self, root_name: &str) -> String {
         if self.nav_stack.is_empty() {
@@ -142,8 +289,8 @@ impl SourceView {
             title: container.title.clone(),
             saved_cursor: self.cursor,
         });
-        if let Some(cached) = self.cache.get(&container.id).cloned() {
-            self.flat = cached;
+        if let Some(cached) = self.cache.get(&container.id) {
+            self.flat = folder_rows(&container.id, cached);
             self.cursor = 0;
             self.loading = false;
             true
@@ -161,8 +308,8 @@ impl SourceView {
             return false;
         };
         if let Some(parent) = self.nav_stack.last() {
-            let parent_id = parent.id.clone();
-            self.flat = self.cache.get(&parent_id).cloned().unwrap_or_default();
+            let children = self.cache.get(&parent.id).map(Vec::as_slice);
+            self.flat = folder_rows(&parent.id, children.unwrap_or_default());
         } else {
             self.flat = self.roots.clone();
         }
@@ -177,7 +324,7 @@ impl SourceView {
 
         // If we navigated into this folder ("cd"), populate the active view
         if self.nav_stack.last().map(|s| s.id.as_str()) == Some(parent_id) {
-            self.flat = children;
+            self.flat = folder_rows(parent_id, &children);
             self.cursor = 0;
             self.loading = false;
             self.expanded.insert(parent_id.to_string());
@@ -237,7 +384,9 @@ impl SourceView {
             self.cache.insert(parent_id.to_string(), items.clone());
         }
         if self.nav_stack.last().map(|s| s.id.as_str()) == Some(parent_id) {
-            self.flat.extend(items);
+            let cursor = self.cursor;
+            self.flat = folder_rows(parent_id, &self.cache[parent_id]);
+            self.cursor = cursor;
         }
     }
 }
@@ -276,6 +425,8 @@ pub struct LyricsCandidate {
 #[derive(Debug, Clone)]
 pub enum SourceRequest {
     CheckAuth(SourceTab),
+    /// Sign in through a browser window that only mixed uses (YouTube Music).
+    BrowserLogin(SourceTab),
     Login {
         source: SourceTab,
         payload: String,
@@ -310,6 +461,19 @@ pub enum SourceRequest {
     DownloadYouTubeTrack {
         video_id: String,
         generation: u64,
+    },
+    /// Play a YouTube track by streaming its audio URL; falls back to downloading.
+    StreamYouTubeTrack {
+        video_id: String,
+        generation: u64,
+    },
+    /// Find the audio URLs of tracks that may play soon, so they start at once.
+    PrepareYouTubeTracks {
+        video_ids: Vec<String>,
+    },
+    /// The radio of a Spotify or YouTube track: similar tracks, starting with it.
+    Radio {
+        seed: TrackRef,
     },
 }
 
@@ -349,6 +513,18 @@ pub enum SourceEvent {
     CoverFetched {
         url: String,
         path: PathBuf,
+    },
+    /// Answer to `StreamYouTubeTrack`: where the track's audio is fetched from.
+    YouTubeTrackUrl {
+        video_id: String,
+        url: String,
+        /// File extension of the audio (e.g. `m4a`), for the cache file and decoder.
+        ext: String,
+    },
+    /// Answer to `Radio`.
+    Radio {
+        seed: TrackRef,
+        result: Result<Vec<BrowseItem>, String>,
     },
     /// Answer to `FetchLyrics`: `Ok(None)` if no provider has lyrics for the track.
     LyricsFetched {
@@ -452,6 +628,89 @@ mod tests {
         assert!(view.expanded.is_empty(), "nested containers are forgotten");
         assert_eq!(view.cursor, 1, "cursor is clamped into the shorter list");
         assert!(!view.collapse("playlists"));
+    }
+
+    #[test]
+    fn search_results_are_grouped_and_scoped() {
+        // As a source ranks them: playlists and songs mixed
+        let mut view = SourceView {
+            search_all: vec![
+                item("p1", true),
+                item("s1", false),
+                item("p2", true),
+                item("s2", false),
+            ],
+            ..Default::default()
+        };
+        view.arrange_search();
+        let shown = |view: &SourceView| {
+            view.search_results
+                .iter()
+                .map(|it| it.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shown(&view),
+            ["s1", "s2", "p1", "p2"],
+            "songs first, ranks kept"
+        );
+
+        let groups = result_groups(&view.search_all, ResultGroup::of_browse);
+        assert_eq!(
+            groups,
+            [(ResultGroup::Songs, 2), (ResultGroup::Playlists, 2)]
+        );
+
+        // The cursor stays on its item while scopes change
+        view.search_cursor = 3;
+        view.search_scope = next_scope(view.search_scope, &groups);
+        assert_eq!(view.search_scope, Some(ResultGroup::Songs));
+        view.arrange_search();
+        assert_eq!(shown(&view), ["s1", "s2"]);
+        assert_eq!(view.search_cursor, 0, "p2 is not shown: back to the top");
+
+        view.search_scope = next_scope(view.search_scope, &groups);
+        view.arrange_search();
+        assert_eq!(shown(&view), ["p1", "p2"]);
+        view.search_cursor = 1;
+        view.search_scope = next_scope(view.search_scope, &groups);
+        assert_eq!(view.search_scope, None, "after the last group: all results");
+        view.arrange_search();
+        assert_eq!(view.search_results[view.search_cursor].id, "p2");
+    }
+
+    #[test]
+    fn an_open_folder_with_tracks_starts_with_an_add_all_row() {
+        let mut view = SourceView {
+            flat: vec![item("playlist", true), item("shelf", true)],
+            ..Default::default()
+        };
+        let track = |id: &str| BrowseItem {
+            track_ref: Some(TrackRef::Spotify(id.into())),
+            ..item(id, false)
+        };
+
+        // Pages arrive while the folder is open: the count follows them
+        view.drill_down(&item("playlist", true));
+        view.expand("playlist", vec![track("t1"), track("t2")]);
+        assert_eq!(view.flat[0].id, "add_all:playlist");
+        assert_eq!(view.flat[0].title, "Add all 2 tracks");
+        view.cursor = 2;
+        view.append_page("playlist", vec![track("t3")]);
+        assert_eq!(view.flat[0].title, "Add all 3 tracks");
+        assert_eq!(view.flat.len(), 4);
+        assert_eq!(view.cursor, 2, "the cursor stays on its row");
+
+        // Opened again from the cache
+        view.navigate_up();
+        view.drill_down(&item("playlist", true));
+        assert_eq!(view.flat[0].title, "Add all 3 tracks");
+
+        // A folder of folders has nothing to add
+        view.navigate_up();
+        view.drill_down(&item("shelf", true));
+        view.expand("shelf", vec![item("p1", true)]);
+        assert_eq!(ids(&view), vec![("p1", 0)]);
     }
 
     #[test]

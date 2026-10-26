@@ -42,6 +42,10 @@ pub struct AppConfig {
     /// next to it. When off they are kept in the cache directory.
     #[serde(default = "default_true")]
     pub save_lyrics_next_to_songs: bool,
+    /// Browser for the YouTube Music sign-in window (a name on PATH or a path).
+    /// Unset: the first of Brave, Chrome, Chromium, Vivaldi and Firefox found.
+    #[serde(default)]
+    pub youtube_browser: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -73,6 +77,7 @@ impl Default for AppConfig {
             yt_cache_mb: 512,
             yt_audio_quality: "bestaudio".to_string(),
             save_lyrics_next_to_songs: true,
+            youtube_browser: None,
         }
     }
 }

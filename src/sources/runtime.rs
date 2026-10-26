@@ -189,6 +189,44 @@ const SPOTIFY_SEARCH_PAGE_SIZE: usize = crate::sources::spotify::SEARCH_PAGE_SIZ
 #[cfg(not(feature = "spotify"))]
 const SPOTIFY_SEARCH_PAGE_SIZE: usize = 10;
 
+/// Sign in to YouTube Music with `cookie`, and keep it for the next start.
+async fn youtube_login(
+    yt_client: &tokio::sync::Mutex<crate::sources::youtube::YouTubeClient>,
+    cookie: String,
+    event_tx: &Sender<SourceEvent>,
+) {
+    let source = SourceTab::YouTube;
+    let mut yt = yt_client.lock().await;
+    match yt.login(&cookie).await {
+        Ok(_) => {
+            let mut creds = crate::config::credentials::Credentials::load();
+            creds.youtube_cookie = Some(cookie);
+            let _ = creds.save();
+            let _ = event_tx.send(SourceEvent::AuthState {
+                source,
+                connected: true,
+                user_name: Some("YouTube Music".to_string()),
+                error: None,
+            });
+            let _ = event_tx.send(SourceEvent::Roots {
+                source,
+                items: yt.library_roots(),
+            });
+        }
+        Err(err) => {
+            let _ = event_tx.send(SourceEvent::AuthState {
+                source,
+                connected: false,
+                user_name: None,
+                error: Some(err),
+            });
+        }
+    }
+}
+
+/// The audio formats played from YouTube, in order of preference.
+const YOUTUBE_AUDIO_FORMAT: &str = "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[acodec^=mp4a]/bestaudio[acodec^=mp3]/bestaudio[ext=aac]";
+
 async fn handle_request(
     req: SourceRequest,
     event_tx: Sender<SourceEvent>,
@@ -229,11 +267,15 @@ async fn handle_request(
                 } else {
                     None
                 };
+                let error = yt.sign_in_expired().then(|| {
+                    "Your YouTube Music sign-in has expired. Press Enter to sign in again."
+                        .to_string()
+                });
                 let _ = event_tx.send(SourceEvent::AuthState {
                     source,
                     connected,
                     user_name,
-                    error: None,
+                    error,
                 });
                 let items = yt.library_roots();
                 let _ = event_tx.send(SourceEvent::Roots { source, items });
@@ -273,37 +315,88 @@ async fn handle_request(
                     }
                 }
             }
-            SourceTab::YouTube => {
-                let mut yt = yt_client.lock().await;
-                match yt.login(&payload).await {
-                    Ok(_) => {
-                        let mut creds = crate::config::credentials::Credentials::load();
-                        creds.youtube_cookie = Some(payload);
-                        let _ = creds.save();
-                        let _ = event_tx.send(SourceEvent::AuthState {
-                            source,
-                            connected: true,
-                            user_name: Some("YouTube Music".to_string()),
-                            error: None,
-                        });
-                        let roots = yt.library_roots();
-                        let _ = event_tx.send(SourceEvent::Roots {
-                            source,
-                            items: roots,
-                        });
-                    }
-                    Err(err) => {
+            SourceTab::YouTube => youtube_login(&yt_client, payload, &event_tx).await,
+            _ => {}
+        },
+        SourceRequest::StreamYouTubeTrack {
+            video_id,
+            generation,
+        } => match ytdlp.stream_url(&video_id, YOUTUBE_AUDIO_FORMAT).await {
+            Ok((url, ext)) => {
+                let _ = event_tx.send(SourceEvent::YouTubeTrackUrl { video_id, url, ext });
+            }
+            Err(e) => {
+                log::info!(
+                    "Streaming {} failed ({}), downloading it instead",
+                    video_id,
+                    e
+                );
+                Box::pin(handle_request(
+                    SourceRequest::DownloadYouTubeTrack {
+                        video_id,
+                        generation,
+                    },
+                    event_tx,
+                    yt_client,
+                    spotify_client,
+                    ytdlp,
+                    in_flight_downloads,
+                    yt_cache_mb,
+                ))
+                .await;
+            }
+        },
+        SourceRequest::PrepareYouTubeTracks { video_ids } => {
+            // One after another: each is a yt-dlp run
+            for video_id in video_ids {
+                if crate::sources::ytdlp::YtDlp::find_cached(&video_id).is_none() {
+                    let _ = ytdlp.stream_url(&video_id, YOUTUBE_AUDIO_FORMAT).await;
+                }
+            }
+        }
+        SourceRequest::Radio { seed } => {
+            let result = match &seed {
+                #[cfg(feature = "spotify")]
+                crate::data::track::TrackRef::Spotify(uri) => {
+                    // Taken out of the client, so the radio does not hold its lock
+                    let catalog = spotify_client.lock().await.catalog();
+                    catalog.radio(uri).await
+                }
+                crate::data::track::TrackRef::YouTube(video_id) => {
+                    yt_client.lock().await.radio(video_id).await
+                }
+                _ => Err("Radio works with Spotify and YouTube tracks".to_string()),
+            };
+            let _ = event_tx.send(SourceEvent::Radio { seed, result });
+        }
+        SourceRequest::BrowserLogin(source) => {
+            #[cfg(feature = "youtube")]
+            if source == SourceTab::YouTube {
+                let progress = |message: &str| {
+                    let _ = event_tx.send(SourceEvent::LoginProgress {
+                        source,
+                        message: message.to_string(),
+                    });
+                };
+                let browser = crate::config::app_config::AppConfig::load().youtube_browser;
+                let yt_dlp = ytdlp.custom_path.as_deref().unwrap_or("yt-dlp");
+                match crate::sources::youtube_login::sign_in(browser.as_deref(), yt_dlp, progress)
+                    .await
+                {
+                    Ok(cookie) => youtube_login(&yt_client, cookie, &event_tx).await,
+                    Err(error) => {
                         let _ = event_tx.send(SourceEvent::AuthState {
                             source,
                             connected: false,
                             user_name: None,
-                            error: Some(err),
+                            error: Some(error),
                         });
                     }
                 }
             }
-            _ => {}
-        },
+            #[cfg(not(feature = "youtube"))]
+            let _ = source;
+        }
         SourceRequest::FetchRoots(source) => match source {
             SourceTab::Spotify => {
                 let sp = spotify_client.lock().await;
@@ -474,7 +567,7 @@ async fn handle_request(
                 progress
             };
 
-            let format = "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[acodec^=mp4a]/bestaudio[acodec^=mp3]/bestaudio[ext=aac]";
+            let format = YOUTUBE_AUDIO_FORMAT;
             let res = ytdlp
                 .download_audio(&video_id, format, &progress, |path| {
                     if let Ok(mut active) = in_flight_downloads.lock() {

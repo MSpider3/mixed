@@ -161,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
     }
-    let backend = CrosstermBackend::new(stdout);
+    let backend = mixed::ui::kitty_text::KittyText::new(CrosstermBackend::new(stdout));
     let mut terminal = Terminal::new(backend)?;
 
     // Set up crossbeam event channels for media commands (MPRIS on Linux)
@@ -178,7 +178,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Try to restore previous session (deferred if player_loading; handled in select! loop)
     // Note: Actually deferred now, will load when player finishes initializing
 
-    // Install SIGINT handler for graceful shutdown
+    // Before the event thread starts reading the terminal, which would eat the replies
+    mixed::ui::theme::detect_terminal();
+
+    // SIGINT, SIGTERM and SIGHUP (terminal window closed) end the loop below, so the
+    // session is saved; without it the queue of an earlier run would come back.
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     {
         let running_clone = running.clone();
@@ -191,6 +195,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, event_rx) = crossbeam_channel::bounded(100);
     std::thread::spawn(move || loop {
         if let Ok(ev) = event::read() {
+            // The terminal's theme may have changed while another window had focus.
+            // Asked here, where nothing else is reading the terminal's replies.
+            if matches!(ev, Event::FocusGained) {
+                mixed::ui::theme::redetect_colors();
+            }
             if event_tx.send(ev).is_err() {
                 break;
             }
@@ -262,13 +271,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if force_clear || app.force_terminal_clear {
             app.force_terminal_clear = false;
-            terminal.clear()?;
+            // A terminal that went away ends the app, but only after saving the session
+            if terminal.clear().is_err() {
+                break;
+            }
             app.refresh_needed = true;
         }
 
         if app.refresh_needed && !resize_pending {
             app.refresh_needed = false;
-            terminal.draw(|f| layout::draw(f, &mut app))?;
+            if terminal.draw(|f| layout::draw(f, &mut app)).is_err() {
+                break;
+            }
         }
 
         let lib_rx = app.library_rx.as_ref().unwrap_or(&never_rx);
@@ -332,6 +346,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Event::FocusGained => {
                             app.terminal_focused = true;
+                            // Draw again in the colours read on focus
+                            app.refresh_needed = true;
                         }
                         Event::FocusLost => {
                             app.terminal_focused = false;
@@ -346,7 +362,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if resize_pending && last_resize_time.elapsed() >= Duration::from_millis(100) {
                     resize_pending = false;
                     app.generate_cover_art_protocol(); // Force reload/scale Sixel image
-                    terminal.clear()?; // Clear terminal to force a clean redraw
+                    if terminal.clear().is_err() {
+                        break;
+                    }
                     app.refresh_needed = true;
                 }
             }

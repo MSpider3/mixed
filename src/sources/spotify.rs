@@ -53,7 +53,36 @@ struct SpotifyPlaylistSimple {
 #[cfg(feature = "spotify")]
 #[derive(Debug, Deserialize)]
 struct SpotifyOwner {
+    id: Option<String>,
     display_name: Option<String>,
+}
+
+#[cfg(feature = "spotify")]
+fn playlist_item(pl: SpotifyPlaylistSimple) -> BrowseItem {
+    let owner = pl
+        .owner
+        .and_then(|o| o.display_name)
+        .unwrap_or_else(|| "Spotify".into());
+    BrowseItem {
+        id: format!("spotify:playlist:{}", pl.id),
+        title: pl.name,
+        subtitle: Some(format!("Playlist • {}", owner)),
+        kind: BrowseItemKind::Playlist,
+        is_container: true,
+        track_ref: None,
+        duration_secs: None,
+        artwork_url: best_image(pl.images.as_deref()),
+        album: None,
+        depth: 0,
+    }
+}
+
+/// A playlist Spotify made (Daily Mix, Discover Weekly, …) rather than a user.
+#[cfg(feature = "spotify")]
+fn made_by_spotify(pl: &SpotifyPlaylistSimple) -> bool {
+    pl.owner.as_ref().is_some_and(|o| {
+        o.id.as_deref() == Some("spotify") || o.display_name.as_deref() == Some("Spotify")
+    })
 }
 
 #[cfg(feature = "spotify")]
@@ -163,6 +192,8 @@ pub struct SpotifyClient {
     token_issued_at: Option<std::time::Instant>,
     last_error: Option<String>,
     http: reqwest::Client,
+    /// Radio and Spotify-made playlists, which the Web API refuses (see spotify_catalog).
+    catalog: std::sync::Arc<crate::sources::spotify_catalog::SpotifyCatalog>,
 }
 
 /// The Search endpoint accepts `limit` in the range 0-10 (per result type).
@@ -246,6 +277,7 @@ impl SpotifyClient {
             token_issued_at: None,
             last_error: None,
             http,
+            catalog: Default::default(),
         };
 
         if client.access_token.is_some() || client.refresh_token.is_some() {
@@ -256,6 +288,11 @@ impl SpotifyClient {
         }
 
         client
+    }
+
+    /// Radio and playlist access through librespot, usable without this client's lock.
+    pub fn catalog(&self) -> std::sync::Arc<crate::sources::spotify_catalog::SpotifyCatalog> {
+        self.catalog.clone()
     }
 
     pub fn is_authenticated(&self) -> bool {
@@ -559,6 +596,18 @@ impl SpotifyClient {
                     depth: 0,
                 },
                 BrowseItem {
+                    id: "spotify:made_for_you".into(),
+                    title: "Made for you".into(),
+                    subtitle: Some("Your mixes and radio".into()),
+                    kind: BrowseItemKind::Playlist,
+                    is_container: true,
+                    track_ref: None,
+                    duration_secs: None,
+                    artwork_url: None,
+                    album: None,
+                    depth: 0,
+                },
+                BrowseItem {
                     id: "spotify:recently_played".into(),
                     title: "Recently Played".into(),
                     subtitle: Some("Your history".into()),
@@ -740,24 +789,7 @@ impl SpotifyClient {
                     .items
                     .into_iter()
                     .flatten()
-                    .map(|pl| {
-                        let owner = pl
-                            .owner
-                            .and_then(|o| o.display_name)
-                            .unwrap_or_else(|| "Spotify".into());
-                        BrowseItem {
-                            id: format!("spotify:playlist:{}", pl.id),
-                            title: pl.name,
-                            subtitle: Some(format!("Playlist • {}", owner)),
-                            kind: BrowseItemKind::Playlist,
-                            is_container: true,
-                            track_ref: None,
-                            duration_secs: None,
-                            artwork_url: best_image(pl.images.as_deref()),
-                            album: None,
-                            depth: 0,
-                        }
-                    })
+                    .map(playlist_item)
                     .collect();
 
                 let is_last = raw_len < 50 || total.is_some_and(|t| current_offset + raw_len >= t);
@@ -841,6 +873,30 @@ impl SpotifyClient {
             return Ok(());
         }
 
+        if parent_id == "spotify:made_for_you" {
+            let items = self.made_for_you().await?;
+            let _ = event_tx.send(SourceEvent::Children {
+                source,
+                parent_id: parent_id.to_string(),
+                items,
+                page: 0,
+                has_more: false,
+            });
+            return Ok(());
+        }
+
+        if let Some(seed) = parent_id.strip_prefix("spotify:radio:") {
+            let items = self.catalog.radio(seed).await?;
+            let _ = event_tx.send(SourceEvent::Children {
+                source,
+                parent_id: parent_id.to_string(),
+                items,
+                page: 0,
+                has_more: false,
+            });
+            return Ok(());
+        }
+
         if let Some(pid) = parent_id.strip_prefix("spotify:playlist:") {
             let mut current_offset = 0;
             let mut page_idx = 0;
@@ -849,7 +905,24 @@ impl SpotifyClient {
                     "https://api.spotify.com/v1/playlists/{}/items?limit=50&offset={}",
                     pid, current_offset
                 );
-                let resp = self.get(&url).await?;
+                let resp = match self.get(&url).await {
+                    Ok(resp) => resp,
+                    // The Web API refuses playlists Spotify made (Daily Mix, radio,
+                    // editorial ones): librespot reads them like the desktop app
+                    Err(web_error) if page_idx == 0 => {
+                        log::info!("Opening {} through librespot: {}", parent_id, web_error);
+                        let items = self.catalog.context_tracks(parent_id).await?;
+                        let _ = event_tx.send(SourceEvent::Children {
+                            source,
+                            parent_id: parent_id.to_string(),
+                            items,
+                            page: 0,
+                            has_more: false,
+                        });
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                };
 
                 let data = resp
                     .json::<SpotifyPaging<SpotifyPlaylistTrackItem>>()
@@ -937,6 +1010,63 @@ impl SpotifyClient {
         }
 
         Ok(())
+    }
+
+    /// The "Made for you" folder: playlists Spotify made that you saved, and the
+    /// radio of your most played tracks.
+    async fn made_for_you(&self) -> Result<Vec<BrowseItem>, String> {
+        let mut items = Vec::new();
+        let mut offset = 0;
+        loop {
+            let url = format!(
+                "https://api.spotify.com/v1/me/playlists?limit=50&offset={}",
+                offset
+            );
+            let data = self
+                .get(&url)
+                .await?
+                .json::<SpotifyPaging<SpotifyPlaylistSimple>>()
+                .await
+                .map_err(|e| e.to_string())?;
+            let count = data.items.len();
+            items.extend(
+                data.items
+                    .into_iter()
+                    .flatten()
+                    .filter(made_by_spotify)
+                    .map(playlist_item),
+            );
+            offset += count;
+            if count < 50 || data.total.is_some_and(|t| offset >= t) {
+                break;
+            }
+        }
+
+        let top = self
+            .get("https://api.spotify.com/v1/me/top/tracks?limit=6")
+            .await?
+            .json::<SpotifyPaging<SpotifyTrack>>()
+            .await
+            .map_err(|e| e.to_string())?;
+        items.extend(top.items.into_iter().flatten().map(|track| {
+            let artists: Vec<String> = track.artists.into_iter().map(|a| a.name).collect();
+            BrowseItem {
+                id: format!("spotify:radio:{}", track.uri),
+                title: format!("{} Radio", track.name),
+                subtitle: Some(format!("Radio • {}", artists.join(", "))),
+                kind: BrowseItemKind::Playlist,
+                is_container: true,
+                track_ref: None,
+                duration_secs: None,
+                artwork_url: track
+                    .album
+                    .as_ref()
+                    .and_then(|a| best_image(a.images.as_deref())),
+                album: None,
+                depth: 0,
+            }
+        }));
+        Ok(items)
     }
 
     pub async fn children(&self, parent_id: &str, _page: usize) -> Result<Vec<BrowseItem>, String> {
@@ -1099,9 +1229,11 @@ mod tests {
             token_issued_at: None,
             last_error: None,
             http: reqwest::Client::new(),
+            catalog: Default::default(),
         };
         let roots = client.library_roots();
         let root_ids: Vec<_> = roots.iter().map(|r| r.id.as_str()).collect();
+        assert!(root_ids.contains(&"spotify:made_for_you"));
         assert!(root_ids.contains(&"spotify:liked_songs"));
         assert!(root_ids.contains(&"spotify:recently_played"));
         assert!(root_ids.contains(&"spotify:top_tracks"));

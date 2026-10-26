@@ -245,9 +245,83 @@ pub fn parse_timestamp(ts: &str) -> Option<f64> {
     }
 }
 
+/// What an audio file is and its quality, e.g. "FLAC · 16-bit · 44.1 kHz" or
+/// "MP3 · 320 kbps · 44.1 kHz". Only the format when the file cannot be read yet
+/// (a download still in progress).
+pub fn audio_summary(path: &Path) -> Option<String> {
+    use lofty::file::FileType;
+    let tagged = Probe::open(path)
+        .ok()
+        .map(|p| p.options(ParseOptions::new().read_cover_art(false)))
+        .and_then(|p| p.read().ok());
+    let props = tagged.as_ref().map(|t| t.properties());
+    let bit_depth = props.and_then(|p| p.bit_depth());
+    let format = match tagged.as_ref().map(|t| t.file_type()) {
+        Some(FileType::Flac) => "FLAC".to_string(),
+        Some(FileType::Mpeg) => "MP3".to_string(),
+        Some(FileType::Vorbis) => "Ogg Vorbis".to_string(),
+        Some(FileType::Opus) => "Opus".to_string(),
+        // An MP4 file with a bit depth holds lossless ALAC
+        Some(FileType::Mp4) if bit_depth.is_some() => "ALAC".to_string(),
+        Some(FileType::Mp4 | FileType::Aac) => "AAC".to_string(),
+        Some(FileType::Wav) => "WAV".to_string(),
+        Some(FileType::Aiff) => "AIFF".to_string(),
+        Some(FileType::WavPack) => "WavPack".to_string(),
+        Some(FileType::Ape) => "APE".to_string(),
+        _ => match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "m4a" | "mp4" | "aac" => "AAC".to_string(),
+            "webm" | "opus" => "Opus".to_string(),
+            "ogg" => "Ogg Vorbis".to_string(),
+            other => other.to_ascii_uppercase(),
+        },
+    };
+    Some(quality_summary(
+        &format,
+        bit_depth,
+        props.and_then(|p| p.audio_bitrate()),
+        props.and_then(|p| p.sample_rate()),
+    ))
+}
+
+/// Lossless files state their bit depth, lossy ones their bitrate.
+fn quality_summary(
+    format: &str,
+    bit_depth: Option<u8>,
+    bitrate_kbps: Option<u32>,
+    sample_rate: Option<u32>,
+) -> String {
+    let mut parts = vec![format.to_string()];
+    if let Some(bits) = bit_depth {
+        parts.push(format!("{}-bit", bits));
+    } else if let Some(kbps) = bitrate_kbps.filter(|&k| k > 0) {
+        parts.push(format!("{} kbps", kbps));
+    }
+    if let Some(hz) = sample_rate.filter(|&hz| hz > 0) {
+        parts.push(if hz % 1000 == 0 {
+            format!("{} kHz", hz / 1000)
+        } else {
+            format!("{:.1} kHz", f64::from(hz) / 1000.0)
+        });
+    }
+    parts.join(" · ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quality_is_described_by_bit_depth_or_bitrate() {
+        assert_eq!(
+            quality_summary("FLAC", Some(16), Some(900), Some(44_100)),
+            "FLAC · 16-bit · 44.1 kHz"
+        );
+        assert_eq!(
+            quality_summary("MP3", None, Some(320), Some(48_000)),
+            "MP3 · 320 kbps · 48 kHz"
+        );
+        assert_eq!(quality_summary("AAC", None, None, None), "AAC");
+    }
 
     #[test]
     fn test_parse_timestamp_valid() {

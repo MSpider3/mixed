@@ -23,6 +23,15 @@ struct Growing {
     cancel: Arc<AtomicBool>,
 }
 
+/// The track being played from a URL (see `range_stream`).
+#[cfg(feature = "youtube")]
+struct Streaming {
+    handle: crate::audio::range_stream::StreamHandle,
+    extension: Option<String>,
+    /// Releases the active reader if it is waiting for a piece.
+    cancel: Arc<AtomicBool>,
+}
+
 pub struct RodioBackend {
     sink: Sink,
     _stream: OutputStream,
@@ -40,6 +49,8 @@ pub struct RodioBackend {
     /// True while a PCM stream is loaded but has not reported its first position.
     clock_held: bool,
     growing: Option<Growing>,
+    #[cfg(feature = "youtube")]
+    streaming: Option<Streaming>,
 }
 
 impl RodioBackend {
@@ -82,6 +93,8 @@ impl RodioBackend {
             volume: 80,
             clock_held: false,
             growing: None,
+            #[cfg(feature = "youtube")]
+            streaming: None,
         })
     }
 
@@ -114,6 +127,41 @@ impl RodioBackend {
             cancel,
         });
         self.start_source(source, fallback_duration)
+    }
+
+    /// Play an audio URL while it is fetched in pieces; it is saved as `save_to`
+    /// once complete.
+    pub fn play_stream(
+        &mut self,
+        url: &str,
+        save_to: PathBuf,
+        fallback_duration: Option<Duration>,
+    ) -> Result<(), String> {
+        self.release_current();
+        self.sink.stop();
+        #[cfg(feature = "youtube")]
+        {
+            let extension = save_to
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_string);
+            self.current_path = Some(save_to.to_string_lossy().into_owned());
+            let handle = crate::audio::range_stream::StreamHandle::open(url, save_to)?;
+            let cancel = Arc::new(AtomicBool::new(false));
+            let source =
+                SymphoniaSource::open_stream(handle.reader(cancel.clone()), extension.as_deref())?;
+            self.streaming = Some(Streaming {
+                handle,
+                extension,
+                cancel,
+            });
+            self.start_source(source, fallback_duration)
+        }
+        #[cfg(not(feature = "youtube"))]
+        {
+            let _ = (url, save_to, fallback_duration);
+            Err("This build cannot stream".to_string())
+        }
     }
 
     /// Append a freshly opened decoder to a new sink and start the clock.
@@ -219,6 +267,11 @@ impl RodioBackend {
         if let Some(growing) = self.growing.take() {
             growing.cancel.store(true, Ordering::Release);
         }
+        #[cfg(feature = "youtube")]
+        if let Some(streaming) = self.streaming.take() {
+            streaming.cancel.store(true, Ordering::Release);
+            streaming.handle.stop();
+        }
         self.clock_held = false;
     }
 
@@ -272,6 +325,14 @@ impl RodioBackend {
 
     /// Open a fresh decoder for the current track from its start.
     fn open_current(&mut self) -> Result<SymphoniaSource, String> {
+        // A stream: a new reader of the same fetching, which then jumps to the seek
+        #[cfg(feature = "youtube")]
+        if let Some(streaming) = self.streaming.as_mut() {
+            streaming.cancel.store(true, Ordering::Release);
+            streaming.cancel = Arc::new(AtomicBool::new(false));
+            let reader = streaming.handle.reader(streaming.cancel.clone());
+            return SymphoniaSource::open_stream(reader, streaming.extension.as_deref());
+        }
         if let Some(growing) = self.growing.take() {
             // Stop the previous reader in case it is waiting for data
             growing.cancel.store(true, Ordering::Release);

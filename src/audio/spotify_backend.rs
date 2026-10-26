@@ -181,6 +181,23 @@ pub async fn store_credentials(access_token: &str) -> Result<(), String> {
     }
 }
 
+/// A librespot session for catalog requests (radio, playlists, track details),
+/// signed in with the stored playback credentials. It is separate from the player's
+/// session, so it works before anything plays.
+#[cfg(feature = "spotify")]
+pub async fn catalog_session() -> Result<Session, String> {
+    let cache = open_cache(false).ok_or("Cannot open the Spotify cache directory")?;
+    let creds = cache
+        .credentials()
+        .ok_or("Spotify playback is not signed in. Sign in from the Spotify Library tab.")?;
+    let session = Session::new(session_config(), Some(cache));
+    match tokio::time::timeout(CONNECT_TIMEOUT, session.connect(creds, true)).await {
+        Ok(Ok(())) => Ok(session),
+        Ok(Err(e)) => Err(format!("Spotify connection failed: {}", e)),
+        Err(_) => Err("Spotify connection failed: connection timed out".into()),
+    }
+}
+
 /// How long Spotify may take to answer a lyrics request.
 #[cfg(feature = "spotify")]
 const LYRICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

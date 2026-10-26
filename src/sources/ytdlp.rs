@@ -23,6 +23,23 @@ pub struct YtDlp {
     /// Set once YouTube has asked to sign in: from then on downloads carry the
     /// user's cookie. Until then it stays out of yt-dlp's hands.
     sign_in_needed: Arc<AtomicBool>,
+    /// Audio URLs found by `stream_url`, by video id: URL and file extension.
+    urls: Arc<std::sync::Mutex<std::collections::HashMap<String, (String, String)>>>,
+}
+
+/// Unix time at which a YouTube media URL stops working (its `expire` parameter).
+fn url_expiry(url: &str) -> Option<u64> {
+    url.split(['?', '&'])
+        .find_map(|p| p.strip_prefix("expire="))
+        .and_then(|v| v.parse().ok())
+}
+
+/// True while `url` has at least 10 minutes left.
+fn url_fresh(url: &str) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    url_expiry(url).is_some_and(|expire| expire > now + 600)
 }
 
 /// The user's YouTube cookie (a `Cookie` header value) as a Netscape cookie file,
@@ -113,6 +130,72 @@ impl YtDlp {
             custom_path,
             extra_args,
             sign_in_needed: Arc::default(),
+            urls: Arc::default(),
+        }
+    }
+
+    /// The URL a track's audio can be fetched from, and its file extension. yt-dlp
+    /// finds it without downloading anything; URLs are kept until they expire, so
+    /// asking ahead (see `SourceRequest::PrepareYouTubeTracks`) makes playing instant.
+    pub async fn stream_url(
+        &self,
+        video_id: &str,
+        format: &str,
+    ) -> Result<(String, String), String> {
+        if let Some((url, ext)) = self.urls.lock().ok().and_then(|u| u.get(video_id).cloned()) {
+            if url_fresh(&url) {
+                return Ok((url, ext));
+            }
+        }
+        let cookies = cookie_file();
+        let mut signed_in = self.sign_in_needed.load(Ordering::Relaxed);
+        loop {
+            let mut cmd = Command::new(self.custom_path.as_deref().unwrap_or("yt-dlp"));
+            cmd.args([
+                "-f",
+                format,
+                "--no-playlist",
+                "--print",
+                "%(url)s",
+                "--print",
+                "%(ext)s",
+            ]);
+            if let Some(jar) = cookies.as_deref().filter(|_| signed_in) {
+                cmd.arg("--cookies").arg(jar);
+            }
+            cmd.args(&self.extra_args)
+                .args(["--", video_id])
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true);
+            let output = cmd
+                .output()
+                .await
+                .map_err(|e| format!("Failed to run yt-dlp: {}", e))?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut lines = stdout.lines().map(str::trim).filter(|l| !l.is_empty());
+            if let (true, Some(url), Some(ext)) =
+                (output.status.success(), lines.next(), lines.next())
+            {
+                if url.starts_with("http") {
+                    let found = (url.to_string(), ext.to_string());
+                    if let Ok(mut urls) = self.urls.lock() {
+                        urls.insert(video_id.to_string(), found.clone());
+                    }
+                    return Ok(found);
+                }
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains(SIGN_IN_PROMPT) && !signed_in && cookies.is_some() {
+                self.sign_in_needed.store(true, Ordering::Relaxed);
+                signed_in = true;
+                continue;
+            }
+            log::warn!(
+                "yt-dlp found no audio URL for {}: {}",
+                video_id,
+                stderr.trim()
+            );
+            return Err(explain_failure(&stderr, signed_in));
         }
     }
 
@@ -377,6 +460,15 @@ impl YtDlp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_urls_are_kept_until_shortly_before_they_expire() {
+        let url = "https://rr1.googlevideo.com/videoplayback?expire=1893456000&ei=x&itag=140";
+        assert_eq!(url_expiry(url), Some(1_893_456_000));
+        assert!(url_fresh(url));
+        assert!(!url_fresh("https://x/videoplayback?expire=1000&itag=140"));
+        assert!(!url_fresh("https://x/videoplayback?itag=140"));
+    }
 
     #[test]
     fn a_cookie_header_becomes_a_netscape_cookie_file() {

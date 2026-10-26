@@ -5,6 +5,42 @@ All notable changes to the **mixed** music player will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-10-27
+
+### Added
+- **Radio**: `R` (Shift+R) on a Spotify or YouTube track, in the queue, a library, search or the Now Playing view, queues its radio (about 50 similar songs) right after the current track.
+- **Made for you**: a folder at the top of the Spotify and YouTube libraries.
+  - Spotify: the playlists Spotify made that you saved (Daily Mix, Discover Weekly, …) and the radio of your six most played tracks.
+  - YouTube Music: My Supermix, Moods & moments and Genres.
+- **Spotify's own playlists**: playlists the Web API refuses to apps since November 2024 (Daily Mix, radio, editorial playlists) are read through `librespot`, the way the desktop app reads them.
+- **YouTube streaming**: tracks play from their audio URL, fetched in 512 KB pieces with range requests, as YouTube Music apps do. Seeking anywhere is immediate, and the complete file is still saved to the cache. When a track starts, the audio URLs of the next three YouTube tracks are found, so skipping to them does not wait for `yt-dlp`. Downloading stays as the fallback.
+- **YouTube sign-in in a browser window**: `Enter` in the YouTube Library tab opens Brave, Chrome, Chromium, Vivaldi or Firefox with a profile that only `mixed` uses. After signing in and closing the window, its cookies are read with `yt-dlp`. Since nothing else uses that profile, its cookies are not replaced and the sign-in lasts, unlike a cookie copied from an everyday browser. `c` still takes a pasted cookie. New `youtube_browser` setting.
+- **Expired YouTube sign-in**: noticed at start (YouTube Music reports the session signed out). The tab says so, and search and playback continue signed out. A pasted cookie that is already signed out is refused.
+- **Queue columns**: position, title, artist, album, source and length. Played tracks are dimmed, the playing one is marked with `▶` and the accent colour, the selected row has a soft background, and the header shows how much is still to come.
+- **Compact now-playing bar**: under the cover and the mini-controls in every view but Track: the track, a progress line that seeks when clicked, shuffle, repeat and volume.
+- **Library breadcrumbs**: the path of the open folder (`Spotify › Playlists › Road Trip`) with its track count and length. Folders show theirs, queued items a check mark.
+- **Grouped search**: results are grouped into Songs, Albums, Artists and Playlists (Songs and Folders for local files), with a chip per group; `Tab` in the search view shows one group at a time. Remote results show their length.
+- **Audio quality**: the Track view shows the format and quality of what plays, e.g. `FLAC · 16-bit · 44.1 kHz`.
+- **Help filter**: `/` in the help view filters the keys.
+- **Add all tracks**: an open Spotify or YouTube folder starts with an "Add all N tracks" row; `Enter` on it queues the folder, `Enter` again takes it out.
+- **More lyrics sources**: Better Lyrics' community database (Unison) and LyricsPlus, asked after LRCLIB.
+- **Theme-proof colours**: the terminal is asked for its colours at startup and whenever its window regains focus. Any colour with too little contrast on the background is replaced, and secondary text is shaded from the terminal's own foreground.
+- **Indian scripts in kitty**: in kitty 0.40 and later, clusters such as "या" are drawn at their full width through kitty's text sizing protocol.
+
+### Changed
+- **Hints**: the line under the logo shows short key and action pairs instead of sentences that were cut off on narrower terminals.
+- **Track view**: the title is in the accent colour and the artist underlined; the album line includes the year. The cover stands alone on the left.
+- **Help & Docs**: the `F6` help and the README list the new keys; `docs/youtube.md` describes the browser sign-in, streaming, radio and Made for you.
+
+### Fixed
+- **Session**: closing the terminal window (or any SIGTERM / SIGHUP) ended `mixed` without saving, so the next start brought back the queue of an earlier session. A queue whose files had partly gone missing also resumed at the wrong track, and a restored Spotify or YouTube track could not be started with Play.
+- **Readability**: text was drawn in fixed white and grey and accents in fixed palette colours, which can vanish on light or generated terminal themes.
+- **Hindi in kitty**: Devanagari clusters with a vowel sign were squeezed into one cell, leaving stray letters and gaps after them.
+- **Mouse**: a click in the Spotify or YouTube library selected the row below the one clicked.
+- **YouTube playlists**: playlists whose id came without the `VL` prefix (moods, genres, YouTube Music's own playlists) failed to open; those whose page `ytmapi-rs` cannot read now open as a mix.
+
+---
+
 ## [1.7.0] - 2026-10-03
 
 ### Added

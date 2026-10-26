@@ -16,6 +16,11 @@ pub enum PlayInput {
         path: PathBuf,
         progress: Arc<crate::audio::growing_file::DownloadProgress>,
     },
+    /// An audio URL played while it is fetched in pieces; saved as `save_to` when complete.
+    Stream {
+        url: String,
+        save_to: PathBuf,
+    },
     Spotify(String),
 }
 
@@ -96,6 +101,15 @@ impl AudioBackend {
         fallback_duration: Option<std::time::Duration>,
     ) -> Result<(), String> {
         self.0.play_growing(path, progress, fallback_duration)
+    }
+
+    pub fn play_stream(
+        &mut self,
+        url: &str,
+        save_to: PathBuf,
+        fallback_duration: Option<std::time::Duration>,
+    ) -> Result<(), String> {
+        self.0.play_stream(url, save_to, fallback_duration)
     }
 
     pub fn play_pcm_source(
@@ -222,7 +236,9 @@ impl Player {
                         current_generation = generation;
                         was_finished = false;
                         match input {
-                            input @ (PlayInput::File(_) | PlayInput::Growing { .. }) => {
+                            input @ (PlayInput::File(_)
+                            | PlayInput::Growing { .. }
+                            | PlayInput::Stream { .. }) => {
                                 current_is_spotify = false;
                                 spotify_backend.stop();
                                 let played = match input {
@@ -232,6 +248,11 @@ impl Player {
                                         duration_ms.map(std::time::Duration::from_millis),
                                     ),
                                     PlayInput::File(path) => backend.play(&path.to_string_lossy()),
+                                    PlayInput::Stream { url, save_to } => backend.play_stream(
+                                        &url,
+                                        save_to,
+                                        duration_ms.map(std::time::Duration::from_millis),
+                                    ),
                                     PlayInput::Spotify(_) => unreachable!(),
                                 };
                                 match played {

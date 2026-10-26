@@ -57,6 +57,12 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         return false;
     }
 
+    // In the search view Tab shows the next group of results
+    if key.code == KeyCode::Tab && app.active_panel == ActivePanel::Search {
+        app.cycle_search_scope();
+        return false;
+    }
+
     // If the user presses F2-F6 or Tab/BackTab, turn off search immediately and clean search query
     match key.code {
         KeyCode::F(2)
@@ -119,6 +125,34 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         return false;
     }
 
+    // Typing the help view's filter; other keys (F-keys, Tab) still work
+    if app.help_filtering && app.active_panel == ActivePanel::Help {
+        let typed = match key.code {
+            KeyCode::Esc => {
+                app.help_filtering = false;
+                app.help_filter.clear();
+                true
+            }
+            KeyCode::Enter => {
+                app.help_filtering = false;
+                true
+            }
+            KeyCode::Backspace => {
+                app.help_filter.pop();
+                true
+            }
+            KeyCode::Char(c) if !is_ctrl => {
+                app.help_filter.push(c);
+                true
+            }
+            _ => false,
+        };
+        if typed {
+            app.refresh_needed = true;
+            return false;
+        }
+    }
+
     // If we're in search mode, handle text input
     if app.searching {
         return handle_search_input(app, key);
@@ -140,6 +174,7 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
 
         // Esc returns to Queue if in another panel
         KeyCode::Esc => {
+            app.help_filter.clear();
             if app.active_panel != ActivePanel::Queue {
                 app.active_panel = ActivePanel::Queue;
                 app.refresh_needed = true;
@@ -213,6 +248,7 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Char('r') => {
             app.cycle_repeat();
         }
+        KeyCode::Char('R') => app.start_radio(),
         KeyCode::Char('v') => app.toggle_visualizer(),
         KeyCode::Char('b') | KeyCode::Char('B') => app.search_artist_web(),
         KeyCode::Char('m') => {
@@ -272,14 +308,24 @@ pub fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
             }
         }
 
-        // Sign in to Spotify with a Client ID of your own
+        // Sign in to Spotify with a Client ID of your own, or to YouTube with a cookie
         KeyCode::Char('c')
-            if app.source == crate::app::SourceTab::Spotify
-                && app.active_panel == ActivePanel::Library =>
+            if matches!(
+                app.source,
+                crate::app::SourceTab::Spotify | crate::app::SourceTab::YouTube
+            ) && app.active_panel == ActivePanel::Library =>
         {
-            app.spotify_view.awaiting_login_input = true;
-            app.spotify_view.login_input.clear();
+            if let Some(view) = app.active_source_view_mut() {
+                view.awaiting_login_input = true;
+                view.login_input.clear();
+            }
             app.refresh_needed = true;
+        }
+
+        // Filter the help view
+        KeyCode::Char('/') if app.active_panel == ActivePanel::Help => {
+            app.help_filtering = true;
+            app.help_filter.clear();
         }
 
         // Search shortcut
@@ -869,165 +915,44 @@ pub fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
                 }
             }
 
-            // 6. Left panel list item click (Queue / Library / Search)
-            if let Some(panel_rect) = app.ui_bounds.left_panel_rect {
-                let is_on_scrollbar = app
-                    .ui_bounds
-                    .scrollbar_rect
-                    .map(|sb| x >= sb.x)
-                    .unwrap_or(false)
-                    || x >= panel_rect.x + panel_rect.width.saturating_sub(1);
-
-                if !is_on_scrollbar
-                    && x >= panel_rect.x
-                    && x < panel_rect.x + panel_rect.width
-                    && y >= panel_rect.y
-                    && y < panel_rect.y + panel_rect.height
-                {
-                    match app.active_panel {
-                        ActivePanel::Queue => {
-                            if panel_rect.height >= 2 && y == panel_rect.y {
-                                return;
-                            }
-                            let clicked_row = if panel_rect.height >= 2 {
-                                (y - panel_rect.y - 1) as usize
-                            } else {
-                                (y - panel_rect.y) as usize
-                            };
-                            let visible_height = if panel_rect.height >= 2 {
-                                (panel_rect.height - 1) as usize
-                            } else {
-                                panel_rect.height as usize
-                            };
-                            let visual_items = app
-                                .playlist
-                                .get_visual_items(app.show_folders, app.config.strip_track_numbers);
-                            let half = visible_height / 2;
-                            let mut highlighted_idx = 0;
-                            for (idx, item) in visual_items.iter().enumerate() {
-                                if let crate::data::playlist::QueueVisualItem::Track {
-                                    entry_idx,
-                                    ..
-                                } = item
-                                {
-                                    if *entry_idx == app.queue_cursor {
-                                        highlighted_idx = idx;
-                                        break;
-                                    }
-                                }
-                            }
-                            let scroll = highlighted_idx
-                                .saturating_sub(half)
-                                .min(visual_items.len().saturating_sub(1));
-                            let item_idx = scroll + clicked_row;
-                            let clicked_entry = if item_idx < visual_items.len() {
-                                if let crate::data::playlist::QueueVisualItem::Track {
-                                    entry_idx,
-                                    ..
-                                } = &visual_items[item_idx]
-                                {
-                                    Some(*entry_idx)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-                            drop(visual_items);
-
-                            if let Some(entry_idx) = clicked_entry {
-                                if app.queue_cursor == entry_idx {
-                                    handle_enter(app);
-                                } else {
-                                    app.queue_cursor = entry_idx;
-                                }
-                            }
-                        }
-                        ActivePanel::Library => {
-                            let clicked_row = (y - panel_rect.y) as usize;
-                            if app.source == crate::app::SourceTab::Spotify
-                                || app.source == crate::app::SourceTab::YouTube
-                            {
-                                if let Some(view) = app.active_source_view_mut() {
-                                    let visible_height = panel_rect.height as usize;
-                                    let (start, end) = crate::ui::widgets::scroll_offset(
-                                        view.cursor,
-                                        view.flat.len(),
-                                        visible_height,
-                                    );
-                                    let target_cursor = start + clicked_row;
-                                    if target_cursor < end {
-                                        if view.cursor == target_cursor {
-                                            handle_enter(app);
-                                        } else {
-                                            view.cursor = target_cursor;
-                                        }
-                                    }
-                                }
-                            } else {
-                                let visible_height = panel_rect.height as usize;
-                                let total_items = app.flat_library.len() + 1;
-                                let scroll =
-                                    if visible_height > 0 && app.library_cursor >= visible_height {
-                                        app.library_cursor - visible_height + 1
-                                    } else {
-                                        0
-                                    }
-                                    .min(total_items.saturating_sub(1));
-                                let target_cursor = scroll + clicked_row;
-                                if target_cursor < total_items {
-                                    if app.library_cursor == target_cursor {
-                                        handle_enter(app);
-                                    } else {
-                                        app.library_cursor = target_cursor;
-                                    }
-                                }
-                            }
-                        }
-                        ActivePanel::Search if (y - panel_rect.y) >= 2 => {
-                            let clicked_row = (y - panel_rect.y) as usize;
-                            let list_row = clicked_row - 2;
-                            let results_height = panel_rect.height.saturating_sub(2) as usize;
-                            if app.source == crate::app::SourceTab::Spotify
-                                || app.source == crate::app::SourceTab::YouTube
-                            {
-                                if let Some(view) = app.active_source_view_mut() {
-                                    let (start, end) = crate::ui::widgets::scroll_offset(
-                                        view.search_cursor,
-                                        view.search_results.len(),
-                                        results_height,
-                                    );
-                                    let target_idx = start + list_row;
-                                    if target_idx < end {
-                                        if view.search_cursor == target_idx {
-                                            handle_enter(app);
-                                        } else {
-                                            view.search_cursor = target_idx;
-                                        }
-                                    }
-                                }
-                            } else {
-                                let scroll =
-                                    if results_height > 0 && app.search_cursor >= results_height {
-                                        app.search_cursor - results_height + 1
-                                    } else {
-                                        0
-                                    }
-                                    .min(app.search_results.len().saturating_sub(1));
-                                let target_idx = scroll + list_row;
-                                if target_idx < app.search_results.len() {
-                                    if app.search_cursor == target_idx {
-                                        handle_enter(app);
-                                    } else {
-                                        app.search_cursor = target_idx;
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
+            // 6. List row click (Queue / Library / Search): each drawn row recorded
+            // which cursor position it stands for
+            let in_list = app.ui_bounds.left_panel_rect.is_some_and(|r| {
+                x >= r.x && x + 1 < r.x + r.width && y >= r.y && y < r.y + r.height
+            }) && !app.ui_bounds.scrollbar_rect.is_some_and(|sb| x >= sb.x);
+            let target = app
+                .ui_bounds
+                .rows
+                .iter()
+                .find(|(row_y, _)| *row_y == y)
+                .map(|&(_, target)| target);
+            if let (true, Some(target)) = (in_list, target) {
+                let remote = matches!(
+                    app.source,
+                    crate::app::SourceTab::Spotify | crate::app::SourceTab::YouTube
+                );
+                let cursor = match (app.active_panel, remote) {
+                    (ActivePanel::Queue, _) => Some(&mut app.queue_cursor),
+                    (ActivePanel::Library, false) => Some(&mut app.library_cursor),
+                    (ActivePanel::Search, false) => Some(&mut app.search_cursor),
+                    (ActivePanel::Library, true) => {
+                        app.active_source_view_mut().map(|view| &mut view.cursor)
                     }
-                    app.refresh_needed = true;
+                    (ActivePanel::Search, true) => app
+                        .active_source_view_mut()
+                        .map(|view| &mut view.search_cursor),
+                    _ => None,
+                };
+                // A click on the selected row opens or plays it
+                let selected = cursor.is_some_and(|cursor| {
+                    let selected = *cursor == target;
+                    *cursor = target;
+                    selected
+                });
+                if selected {
+                    handle_enter(app);
                 }
+                app.refresh_needed = true;
             }
         }
         MouseEventKind::ScrollUp => scroll_up(app),

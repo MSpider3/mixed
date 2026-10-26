@@ -51,7 +51,131 @@ use ytmapi_rs::auth::noauth::NoAuthToken;
 #[cfg(feature = "youtube")]
 use ytmapi_rs::auth::BrowserToken;
 #[cfg(feature = "youtube")]
-use ytmapi_rs::common::{AlbumID, PlaylistID, Thumbnail, YoutubeID};
+use ytmapi_rs::common::{AlbumID, MoodCategoryParams, PlaylistID, Thumbnail, VideoID, YoutubeID};
+#[cfg(feature = "youtube")]
+use ytmapi_rs::parse::WatchPlaylistTrack;
+#[cfg(feature = "youtube")]
+use ytmapi_rs::query::{GetMoodPlaylistsQuery, GetWatchPlaylistQuery};
+
+/// YouTube Music's "My Supermix": a mix made from the signed-in account's listening.
+#[cfg(feature = "youtube")]
+const SUPERMIX_ID: &str = "RDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY";
+
+/// Run the same request on the signed-in or the signed-out client.
+#[cfg(feature = "youtube")]
+macro_rules! with_client {
+    ($inner:expr, $c:ident => $call:expr) => {
+        match $inner {
+            YouTubeClientInner::Authenticated($c) => $call,
+            YouTubeClientInner::Unauthenticated($c) => $call,
+        }
+    };
+}
+
+#[cfg(feature = "youtube")]
+fn watch_track_item(track: WatchPlaylistTrack) -> BrowseItem {
+    let vid = track.video_id.get_raw().to_string();
+    BrowseItem {
+        id: format!("yt:song:{}", vid),
+        title: track.title,
+        subtitle: Some(track.author),
+        kind: BrowseItemKind::Track,
+        is_container: false,
+        track_ref: Some(TrackRef::YouTube(vid)),
+        duration_secs: parse_duration_str(&track.duration),
+        artwork_url: select_thumbnail(&track.thumbnails),
+        album: None,
+        depth: 0,
+    }
+}
+
+#[cfg(feature = "youtube")]
+/// The playlists and albums of a mood or genre page, each subtitled with its shelf.
+/// Read from the page itself: genre pages have a layout ytmapi-rs cannot parse.
+fn mood_page_items(page: &serde_json::Value) -> Vec<BrowseItem> {
+    fn text(value: &serde_json::Value) -> String {
+        value["runs"]
+            .as_array()
+            .map(|runs| runs.iter().filter_map(|r| r["text"].as_str()).collect())
+            .unwrap_or_default()
+    }
+    fn walk(value: &serde_json::Value, shelf: &str, out: &mut Vec<BrowseItem>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                // A shelf names the cards below it
+                let header = &value["header"];
+                let title = text(&header["musicCarouselShelfBasicHeaderRenderer"]["title"]);
+                let title = if title.is_empty() {
+                    text(&header["gridHeaderRenderer"]["title"])
+                } else {
+                    title
+                };
+                let shelf = if title.is_empty() { shelf } else { &title };
+
+                if let Some(card) = map.get("musicTwoRowItemRenderer") {
+                    let browse_id = card["navigationEndpoint"]["browseEndpoint"]["browseId"]
+                        .as_str()
+                        .unwrap_or("");
+                    let id = if let Some(playlist) = browse_id.strip_prefix("VL") {
+                        format!("yt:playlist:{}", playlist)
+                    } else if browse_id.starts_with("MPRE") {
+                        format!("yt:album:{}", browse_id)
+                    } else {
+                        return;
+                    };
+                    let thumbnails = &card["thumbnailRenderer"]["musicThumbnailRenderer"]
+                        ["thumbnail"]["thumbnails"];
+                    let cover = thumbnails.as_array().and_then(|t| {
+                        t.iter()
+                            .max_by_key(|t| t["width"].as_u64().unwrap_or(0))
+                            .and_then(|t| t["url"].as_str())
+                            .map(full_size_cover)
+                    });
+                    let by = text(&card["subtitle"]);
+                    let subtitle = match (shelf.is_empty(), by.is_empty()) {
+                        (false, false) => format!("{} • {}", shelf, by),
+                        (false, true) => shelf.to_string(),
+                        _ => by,
+                    };
+                    let mut item = folder(id, text(&card["title"]), &subtitle, cover);
+                    if item.id.starts_with("yt:album:") {
+                        item.kind = BrowseItemKind::Album;
+                    }
+                    out.push(item);
+                    return;
+                }
+                for child in map.values() {
+                    walk(child, shelf, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    walk(child, shelf, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(page, "", &mut out);
+    out
+}
+
+#[cfg(feature = "youtube")]
+fn folder(id: String, title: String, subtitle: &str, artwork_url: Option<String>) -> BrowseItem {
+    BrowseItem {
+        id,
+        title,
+        subtitle: Some(subtitle.to_string()),
+        kind: BrowseItemKind::Playlist,
+        is_container: true,
+        track_ref: None,
+        duration_secs: None,
+        artwork_url,
+        album: None,
+        depth: 0,
+    }
+}
 #[cfg(feature = "youtube")]
 use ytmapi_rs::parse::PlaylistItem;
 #[cfg(feature = "youtube")]
@@ -74,15 +198,24 @@ pub enum YouTubeClientInner {
 #[cfg(feature = "youtube")]
 pub struct YouTubeClient {
     inner: Option<YouTubeClientInner>,
+    /// The saved sign-in was found signed out when the client started.
+    expired: bool,
 }
 
 #[cfg(feature = "youtube")]
 impl YouTubeClient {
     pub async fn new(cookie: Option<&str>) -> Self {
+        let mut expired = false;
         if let Some(cookie) = cookie {
-            if let Ok(client) = YtMusic::from_cookie(cookie).await {
+            // A cookie Google has signed out is still taken by `from_cookie`; the
+            // library then fails. Signed out, search and playback work without it.
+            if crate::sources::youtube_login::is_signed_in(cookie).await == Some(false) {
+                log::warn!("The saved YouTube Music sign-in has expired");
+                expired = true;
+            } else if let Ok(client) = YtMusic::from_cookie(cookie).await {
                 return Self {
                     inner: Some(YouTubeClientInner::Authenticated(client)),
+                    expired,
                 };
             }
         }
@@ -90,7 +223,13 @@ impl YouTubeClient {
         let unauth = YtMusic::new_unauthenticated().await.ok();
         Self {
             inner: unauth.map(YouTubeClientInner::Unauthenticated),
+            expired,
         }
+    }
+
+    /// True when the saved sign-in was found signed out.
+    pub fn sign_in_expired(&self) -> bool {
+        self.expired
     }
 
     pub fn is_authenticated(&self) -> bool {
@@ -98,9 +237,16 @@ impl YouTubeClient {
     }
 
     pub async fn login(&mut self, cookie: &str) -> Result<String, String> {
+        if crate::sources::youtube_login::is_signed_in(cookie).await == Some(false) {
+            return Err(
+                "This cookie is signed out. Press Enter to sign in in a browser window instead."
+                    .to_string(),
+            );
+        }
         match YtMusic::from_cookie(cookie).await {
             Ok(client) => {
                 self.inner = Some(YouTubeClientInner::Authenticated(client));
+                self.expired = false;
                 Ok("Connected to YouTube Music".to_string())
             }
             Err(e) => Err(format!("Failed to authenticate with cookie: {}", e)),
@@ -202,9 +348,27 @@ impl YouTubeClient {
         Ok(items)
     }
 
+    /// YouTube Music's radio for a song: similar songs, starting with it.
+    pub async fn radio(&self, video_id: &str) -> Result<Vec<BrowseItem>, String> {
+        let Some(ref inner) = self.inner else {
+            return Err("YouTube Music client not initialized".to_string());
+        };
+        let tracks = with_client!(inner, c => c
+            .get_watch_playlist_from_video_id(VideoID::from_raw(video_id))
+            .await)
+        .map_err(|e| e.to_string())?;
+        Ok(tracks.into_iter().map(watch_track_item).collect())
+    }
+
     pub fn library_roots(&self) -> Vec<BrowseItem> {
         if self.is_authenticated() {
             vec![
+                folder(
+                    "yt:made_for_you".into(),
+                    "Made for you".into(),
+                    "Your mixes, moods and genres",
+                    None,
+                ),
                 BrowseItem {
                     id: "yt:liked_songs".into(),
                     title: "Liked Songs".into(),
@@ -245,8 +409,8 @@ impl YouTubeClient {
         } else {
             vec![BrowseItem {
                 id: "yt:login_hint".into(),
-                title: "Login with YouTube Music cookie".into(),
-                subtitle: Some("Press Enter to input cookie or search directly".into()),
+                title: "Sign in to YouTube Music".into(),
+                subtitle: Some("Press Enter, or search without signing in".into()),
                 kind: BrowseItemKind::Playlist,
                 is_container: false,
                 track_ref: None,
@@ -262,6 +426,70 @@ impl YouTubeClient {
         let Some(ref inner) = self.inner else {
             return Err("YouTube Music client not initialized".to_string());
         };
+
+        if parent_id == "yt:made_for_you" {
+            return Ok(vec![
+                folder(
+                    format!("yt:watch:{}", SUPERMIX_ID),
+                    "My Supermix".into(),
+                    "Mix • made from your listening",
+                    None,
+                ),
+                folder(
+                    "yt:moods:0".into(),
+                    "Moods & moments".into(),
+                    "Playlists for a mood",
+                    None,
+                ),
+                folder(
+                    "yt:moods:1".into(),
+                    "Genres".into(),
+                    "Playlists by genre",
+                    None,
+                ),
+            ]);
+        }
+
+        // A mix or radio: a playlist YouTube Music builds when it is played
+        if let Some(pid) = parent_id.strip_prefix("yt:watch:") {
+            let query = GetWatchPlaylistQuery::new_from_playlist_id(PlaylistID::from_raw(pid));
+            let tracks =
+                with_client!(inner, c => c.query(query).await).map_err(|e| e.to_string())?;
+            return Ok(tracks.into_iter().map(watch_track_item).collect());
+        }
+
+        if let Some(vid) = parent_id.strip_prefix("yt:radio:") {
+            return self.radio(vid).await;
+        }
+
+        if let Some(section) = parent_id.strip_prefix("yt:moods:") {
+            let sections = with_client!(inner, c => c.get_mood_categories().await)
+                .map_err(|e| e.to_string())?;
+            let index: usize = section.parse().unwrap_or(0);
+            return Ok(sections
+                .into_iter()
+                .nth(index)
+                .map(|s| s.mood_categories)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|category| {
+                    folder(
+                        format!("yt:mood:{}", category.params.get_raw()),
+                        category.title,
+                        "Playlists",
+                        None,
+                    )
+                })
+                .collect());
+        }
+
+        if let Some(params) = parent_id.strip_prefix("yt:mood:") {
+            let query = GetMoodPlaylistsQuery::new(MoodCategoryParams::from_raw(params));
+            let page = with_client!(inner, c => c.raw_json_query(query).await)
+                .map_err(|e| e.to_string())?;
+            let page: serde_json::Value = serde_json::from_str(&page).map_err(|e| e.to_string())?;
+            return Ok(mood_page_items(&page));
+        }
 
         if parent_id == "yt:liked_songs" {
             let YouTubeClientInner::Authenticated(ref c) = inner else {
@@ -341,15 +569,26 @@ impl YouTubeClient {
         }
 
         if let Some(pid) = parent_id.strip_prefix("yt:playlist:") {
-            let tracks = match inner {
-                YouTubeClientInner::Authenticated(c) => c
-                    .get_playlist_tracks(PlaylistID::from_raw(pid))
-                    .await
-                    .map_err(|e| e.to_string())?,
-                YouTubeClientInner::Unauthenticated(c) => c
-                    .get_playlist_tracks(PlaylistID::from_raw(pid))
-                    .await
-                    .map_err(|e| e.to_string())?,
+            // YouTube Music opens a playlist by its browse id: the id after "VL"
+            let browse_id = if pid.starts_with("VL") {
+                pid.to_string()
+            } else {
+                format!("VL{}", pid)
+            };
+            let tracks = match with_client!(inner, c => c
+                .get_playlist_tracks(PlaylistID::from_raw(browse_id.as_str()))
+                .await)
+            {
+                Ok(tracks) => tracks,
+                // Some of YouTube Music's own playlists have a page ytmapi-rs cannot
+                // read; played as a mix they list their tracks
+                Err(e) => {
+                    let mix = format!("yt:watch:{}", browse_id.trim_start_matches("VL"));
+                    log::info!("Opening {} as a mix: {}", parent_id, e);
+                    return Box::pin(self.children(&mix))
+                        .await
+                        .map_err(|_| e.to_string());
+                }
             };
 
             let mut items = Vec::new();
@@ -450,6 +689,9 @@ impl YouTubeClient {
     pub fn is_authenticated(&self) -> bool {
         false
     }
+    pub fn sign_in_expired(&self) -> bool {
+        false
+    }
     pub async fn login(&mut self, _cookie: &str) -> Result<String, String> {
         Err("YouTube feature not enabled in build".to_string())
     }
@@ -460,6 +702,9 @@ impl YouTubeClient {
         Vec::new()
     }
     pub async fn children(&self, _parent_id: &str) -> Result<Vec<BrowseItem>, String> {
+        Err("YouTube feature not enabled in build".to_string())
+    }
+    pub async fn radio(&self, _video_id: &str) -> Result<Vec<BrowseItem>, String> {
         Err("YouTube feature not enabled in build".to_string())
     }
 }

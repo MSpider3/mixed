@@ -1529,7 +1529,7 @@ async fn test_youtube_smoke_interface() {
         !roots.is_empty(),
         "Library roots must produce navigation items"
     );
-    assert_eq!(roots[0].title, "Login with YouTube Music cookie");
+    assert_eq!(roots[0].title, "Sign in to YouTube Music");
 }
 
 fn create_test_app() -> App {
@@ -1552,6 +1552,8 @@ fn test_shift_enter_play_next_local_and_remote() {
             is_last: false,
             ancestor_last: Vec::new(),
             enqueued: false,
+            tracks: 1,
+            duration_secs: 0,
             entry: mixed::data::library::LibraryEntry::Track {
                 name: "Track A".to_string(),
                 path: std::path::PathBuf::from("/mock/a.mp3"),
@@ -1563,6 +1565,8 @@ fn test_shift_enter_play_next_local_and_remote() {
             is_last: true,
             ancestor_last: Vec::new(),
             enqueued: false,
+            tracks: 1,
+            duration_secs: 0,
             entry: mixed::data::library::LibraryEntry::Track {
                 name: "Track B".to_string(),
                 path: std::path::PathBuf::from("/mock/b.mp3"),
@@ -1968,4 +1972,290 @@ fn test_next_on_the_last_track_keeps_playing_and_play_restarts_after_stop() {
     press(&mut app, 'p');
     assert!(!app.stopped, "play after a stop restarts the current track");
     assert!(app.buffering, "the track is being loaded again");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_session_restores_the_saved_track_when_earlier_files_are_gone() {
+    use mixed::config::session::{save_session, SessionState};
+    use mixed::data::metadata::TrackMetadata;
+    use mixed::data::playlist::PlaylistEntry;
+    use mixed::data::track::TrackRef;
+
+    // The session file lives under XDG_DATA_HOME: point it at a scratch folder
+    let dir = std::env::temp_dir().join("mixed_test_session_restore");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::env::set_var("XDG_DATA_HOME", &dir);
+
+    let entry = |id: TrackRef, title: &str| {
+        PlaylistEntry::new(
+            id,
+            TrackMetadata {
+                title: Some(title.into()),
+                ..Default::default()
+            },
+        )
+    };
+    let state = SessionState {
+        queue: vec![
+            entry(TrackRef::Local("/nonexistent/one.mp3".into()), "One"),
+            entry(TrackRef::Local("/nonexistent/two.mp3".into()), "Two"),
+            entry(
+                TrackRef::Spotify("spotify:track:Restored01".into()),
+                "Streamed",
+            ),
+            entry(TrackRef::YouTube("RestoredYt01".into()), "After"),
+        ],
+        current_index: 2,
+        ..Default::default()
+    };
+    save_session(&state);
+
+    let mut app = create_test_app();
+    app.load_session();
+    std::env::remove_var("XDG_DATA_HOME");
+
+    let current = app.playlist.current_entry().expect("a current track");
+    assert_eq!(
+        current.metadata.title.as_deref(),
+        Some("Streamed"),
+        "the saved track, not the one now at its old position"
+    );
+    assert!(app.stopped, "a streamed track waits for Play");
+    assert_eq!(
+        app.now_playing_meta
+            .as_ref()
+            .and_then(|m| m.title.as_deref()),
+        Some("Streamed")
+    );
+}
+
+#[test]
+fn test_add_all_row_queues_and_unqueues_a_whole_folder() {
+    use mixed::app::SourceTab;
+    use mixed::data::track::TrackRef;
+    use mixed::sources::{BrowseItem, BrowseItemKind, SourceEvent};
+
+    let mut app = create_test_app();
+    app.switch_source(SourceTab::Spotify);
+    app.active_panel = ActivePanel::Library;
+    app.spotify_view.connected = true;
+    let folder = BrowseItem {
+        id: "spotify:playlist:TestAddAll".into(),
+        title: "Road Trip".into(),
+        subtitle: None,
+        kind: BrowseItemKind::Playlist,
+        is_container: true,
+        track_ref: None,
+        duration_secs: None,
+        artwork_url: None,
+        album: None,
+        depth: 0,
+    };
+    let track = |n: u32| BrowseItem {
+        id: format!("spotify:track:TestAddAll{n}"),
+        title: format!("Song {n}"),
+        is_container: false,
+        kind: BrowseItemKind::Track,
+        track_ref: Some(TrackRef::Spotify(format!("spotify:track:TestAddAll{n}"))),
+        ..folder.clone()
+    };
+    app.spotify_view.roots = vec![folder.clone()];
+    app.spotify_view.flat = vec![folder.clone()];
+    app.spotify_view.drill_down(&folder);
+    app.handle_source_event(SourceEvent::Children {
+        source: SourceTab::Spotify,
+        parent_id: folder.id.clone(),
+        items: (1..=3).map(track).collect(),
+        page: 0,
+        has_more: false,
+    });
+    assert_eq!(app.spotify_view.flat[0].title, "Add all 3 tracks");
+    assert_eq!(app.spotify_view.cursor, 0);
+
+    app.remote_enqueue_selected(false, false);
+    assert_eq!(app.playlist.len(), 3, "all three tracks are queued");
+
+    app.remote_enqueue_selected(false, false);
+    assert!(
+        app.playlist.is_empty(),
+        "a second Enter takes them out again"
+    );
+    assert!(app
+        .status_msg
+        .as_deref()
+        .is_some_and(|s| s.starts_with("Removed 3 tracks")));
+}
+
+/// The screen row whose text contains `needle`.
+fn row_with(terminal: &Terminal<TestBackend>, needle: &str) -> u16 {
+    let buf = terminal.backend().buffer();
+    (0..buf.area.height)
+        .find(|&y| {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            line.contains(needle)
+        })
+        .unwrap_or_else(|| panic!("{} is on screen", needle))
+}
+
+#[test]
+fn test_clicking_a_row_selects_that_row() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use mixed::data::metadata::TrackMetadata;
+    use mixed::sources::{BrowseItem, BrowseItemKind};
+
+    let mut app = create_test_app();
+    for name in ["Track A", "Track B", "Track C"] {
+        app.playlist.add(
+            std::path::PathBuf::from(format!("/mock/{}.mp3", name)),
+            TrackMetadata {
+                title: Some(name.to_string()),
+                ..Default::default()
+            },
+        );
+    }
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    let click = |app: &mut App, y: u16| {
+        let x = app.ui_bounds.left_panel_rect.unwrap().x + 10;
+        events::handle_mouse(
+            app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+    };
+
+    // Queue: under a summary and a column heading
+    app.active_panel = ActivePanel::Queue;
+    terminal.draw(|f| layout::draw(f, &mut app)).unwrap();
+    let y = row_with(&terminal, "Track C");
+    click(&mut app, y);
+    assert_eq!(app.queue_cursor, 2);
+    // A click on a heading selects nothing
+    let heading = row_with(&terminal, "Title");
+    click(&mut app, heading);
+    assert_eq!(app.queue_cursor, 2);
+
+    // Spotify library: under its breadcrumb
+    app.switch_source(mixed::app::SourceTab::Spotify);
+    app.active_panel = ActivePanel::Library;
+    app.spotify_view.connected = true;
+    app.spotify_view.flat = ["One", "Two", "Three"]
+        .iter()
+        .map(|title| BrowseItem {
+            id: title.to_string(),
+            title: format!("Folder {}", title),
+            subtitle: None,
+            kind: BrowseItemKind::Playlist,
+            is_container: true,
+            track_ref: None,
+            duration_secs: None,
+            artwork_url: None,
+            album: None,
+            depth: 0,
+        })
+        .collect();
+    terminal.draw(|f| layout::draw(f, &mut app)).unwrap();
+    let y = row_with(&terminal, "Folder Two");
+    click(&mut app, y);
+    assert_eq!(
+        app.spotify_view.cursor, 1,
+        "the clicked row, not the one below"
+    );
+}
+
+#[test]
+fn test_help_filter_and_search_groups_follow_their_keys() {
+    let mut app = create_test_app();
+    let press = |app: &mut App, code: KeyCode| {
+        events::handle_key(app, KeyEvent::new(code, KeyModifiers::NONE))
+    };
+
+    // Help: "/" starts a filter; letters go into it instead of running commands
+    app.active_panel = ActivePanel::Help;
+    press(&mut app, KeyCode::Char('/'));
+    for c in "qs".chars() {
+        assert!(!press(&mut app, KeyCode::Char(c)), "q is typed, not quit");
+    }
+    assert_eq!(app.help_filter, "qs");
+    assert!(!app.playlist.shuffle, "s is typed, not shuffle");
+    press(&mut app, KeyCode::Enter);
+    assert!(!app.help_filtering);
+    assert_eq!(app.help_filter, "qs", "Enter keeps the filter");
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.help_filter, "", "Esc clears it");
+    assert_eq!(app.active_panel, ActivePanel::Help);
+
+    // Search: Tab shows the next group of results instead of the next view
+    app.active_panel = ActivePanel::Search;
+    app.search_all = vec![
+        mixed::data::library::LibraryEntry::Directory {
+            name: "Folder".into(),
+            path: "/mock/folder".into(),
+            children: Vec::new(),
+        },
+        mixed::data::library::LibraryEntry::Track {
+            name: "Song".into(),
+            path: "/mock/song.mp3".into(),
+            metadata: Default::default(),
+        },
+    ];
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.active_panel, ActivePanel::Search);
+    assert_eq!(app.search_scope, Some(mixed::sources::ResultGroup::Songs));
+    assert_eq!(app.search_results.len(), 1);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.search_scope, None, "back to all results");
+    assert_eq!(app.search_results.len(), 2);
+    assert_eq!(app.search_results[0].name(), "Song", "songs before folders");
+}
+
+#[test]
+fn test_radio_tracks_play_after_the_current_one() {
+    use mixed::data::track::TrackRef;
+    use mixed::sources::{BrowseItem, BrowseItemKind, SourceEvent};
+
+    let mut app = create_test_app();
+    for name in ["a", "b"] {
+        app.playlist.add(
+            TrackRef::YouTube(name.into()),
+            mixed::data::metadata::TrackMetadata::default(),
+        );
+    }
+    app.playlist.current = 0;
+    let track = |id: &str| BrowseItem {
+        id: id.into(),
+        title: id.to_uppercase(),
+        subtitle: Some("Artist".into()),
+        kind: BrowseItemKind::Track,
+        is_container: false,
+        track_ref: Some(TrackRef::YouTube(id.into())),
+        duration_secs: Some(200),
+        artwork_url: None,
+        album: None,
+        depth: 0,
+    };
+    // The radio starts with the seed, which is queued already
+    app.handle_source_event(SourceEvent::Radio {
+        seed: TrackRef::YouTube("a".into()),
+        result: Ok(vec![track("a"), track("x"), track("y")]),
+    });
+
+    let order: Vec<String> = app
+        .playlist
+        .play_order
+        .iter()
+        .map(|&i| match &app.playlist.entries[i].id {
+            TrackRef::YouTube(id) => id.clone(),
+            other => format!("{:?}", other),
+        })
+        .collect();
+    assert_eq!(order, ["a", "x", "y", "b"]);
+    assert_eq!(app.playlist.len(), 4, "the seed is not queued twice");
+    assert!(app.status_msg.as_deref().unwrap_or("").contains("2 tracks"));
 }

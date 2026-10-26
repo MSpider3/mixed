@@ -31,9 +31,25 @@ If `yt-dlp` is missing, playing a YouTube track shows `yt-dlp not found. Install
 
 Logging in adds your own library in the Library tab (`F3`): **Liked Songs**, **Playlists** and **Albums**.
 
-## Logging in with your browser cookie
+## Signing in
 
-`mixed` signs in to YouTube Music with the cookie from a browser session.
+1. Switch to YouTube Music (`Ctrl+3` / `Alt+3`) and open the Library tab (`F3`).
+2. Press `Enter`. A browser window opens at Google's sign-in page.
+3. Sign in to YouTube Music there (2-step verification and passkeys work as usual), then close the window.
+
+Your library appears a moment later. `mixed` never sees your password: it keeps the cookies of the signed-in session, the same way a cookie copied by hand would, only without the copying.
+
+### Why this sign-in lasts
+
+The window belongs to a browser profile that only `mixed` uses, in its data directory (`~/.local/share/mixed/youtube-browser` on Linux). A cookie copied from the browser you use every day stops working within days, because that browser keeps receiving new cookies from Google, which replace the copied one. Nothing else uses `mixed`'s profile, so its cookies stay valid much longer.
+
+If Google does end the session (after a password change, for example), `mixed` notices at start and the YouTube tab says the sign-in has expired. Press `Enter` again: the same window opens, usually still signed in, so closing it is enough.
+
+The browser is the first of Brave, Chrome, Chromium, Vivaldi and Firefox found on your `PATH`. Set `youtube_browser` in `config.json` to choose another (a name on the `PATH` or the full path). Chromium-based browsers are started with `--password-store=basic`, so that `yt-dlp` can read the cookies of the profile without your desktop's keyring.
+
+## Signing in with a copied cookie
+
+Without a supported browser, or if you prefer it, `mixed` also signs in with the cookie of a browser session copied by hand. Copy it from a private window that you close afterwards: a cookie of a window that stays in use is replaced by the browser within days.
 
 ### 1. Copy the cookie
 
@@ -48,7 +64,7 @@ Logging in adds your own library in the Library tab (`F3`): **Liked Songs**, **P
 **In the app (recommended):**
 
 1. Switch to YouTube Music (`Ctrl+3` / `Alt+3`) and open the Library tab (`F3`).
-2. Press `Enter`. A `Credentials:` prompt appears.
+2. Press `c`. A `Credentials:` prompt appears.
 3. Paste the cookie and press `Enter`.
 
 While the prompt is open, `Esc` cancels and `Ctrl+U` clears the input. On success the cookie is saved and your library appears.
@@ -81,19 +97,26 @@ Downloading with your account's cookie is something YouTube can act on: the `yt-
 
 ## How playback works
 
-1. Pressing `Enter` on a track adds it to the queue. When it becomes the current track, `mixed` starts `yt-dlp` in the background and shows `downloading…` in place of the progress bar.
-2. Once the first ~190 KB have arrived (after `yt-dlp` has resolved the video, which takes a few seconds), playback starts from the partial file while the rest downloads.
-3. When the download finishes, the file stays in the cache and later plays start immediately.
+1. Pressing `Enter` on a track adds it to the queue. When it becomes the current track, `mixed` asks `yt-dlp` for the URL of its audio (a few seconds) and shows `downloading…` in place of the progress bar.
+2. `mixed` then plays that URL directly, the way YouTube Music apps do: it fetches the audio in pieces of 512 KB, starting where playback is, so the first sound comes after the first piece.
+3. Once every piece is in, the file is saved to the cache and later plays start immediately.
+
+Whenever a track starts, `mixed` also finds the audio URLs of the next three YouTube tracks in the queue. YouTube's URLs stay valid for hours, so skipping to one of those tracks starts without waiting for `yt-dlp`.
 
 Details:
 
 - **Album and cover art:** the Now Playing view shows a track's album name and its cover in full size (544 pixels). Videos in a playlist have no album. Tracks queued by a version of `mixed` from before album names were added show `Unknown Album` until they are removed and added again.
 - **Formats:** only AAC (`.m4a`), MP3 and raw AAC audio is requested. WebM/Opus is not requested because the built-in decoder cannot play it.
-- **Seeking while downloading:** you can seek within the part that has already arrived. Seeking further ahead moves to the furthest point available. After the download completes, seeking is unrestricted.
+- **Seeking:** seeking anywhere is immediate: the fetching moves to the new position and fills in the rest afterwards.
 - **Prefetch:** when the current track passes 50%, the next track is downloaded in advance if it is a YouTube track.
-- **Fallback:** if a partial file cannot be played as it arrives, `mixed` waits for the complete download instead.
+- **Fallback:** if `yt-dlp` cannot give a URL, `mixed` downloads the track with `yt-dlp` instead and plays the partial file while it arrives (there, seeking is limited to the part that has arrived).
 - **Failures:** a track that fails to download is skipped. After three failures in a row, playback stops.
 - **Lyrics:** looked up online when the track starts. See [Lyrics](lyrics.md).
+
+## Radio and Made for you
+
+- **Radio:** `R` (Shift+R) on a YouTube track, in the queue, a library or search, or in the Now Playing view, queues YouTube Music's radio of that song (about 50 similar songs) right after the current track. It works without signing in.
+- **Made for you:** a folder in the YouTube Library tab with **My Supermix** (made from your listening), **Moods & moments** (Chill, Focus, Workout, …) and **Genres**, each a list of YouTube Music's own playlists.
 
 ## Configuration
 
@@ -104,6 +127,7 @@ The YouTube settings are keys in `config.json`, which is in the same directory a
 | `yt_dlp_path` | not set | Full path to the `yt-dlp` binary, if it is not on your `PATH` |
 | `yt_dlp_args` | `[]` | Extra arguments passed to `yt-dlp` on every download, each word as its own string |
 | `yt_cache_mb` | `512` | Maximum size of the audio cache in megabytes |
+| `youtube_browser` | not set | Browser for the sign-in window (see [Signing in](#signing-in)) |
 
 `mixed` creates the file with all its settings on first run. To change a YouTube setting, edit that line and leave the others as they are. With Deno installed, the file looks like this:
 
@@ -122,7 +146,8 @@ The YouTube settings are keys in `config.json`, which is in the same directory a
   "yt_dlp_args": ["--js-runtimes", "deno:/home/you/.deno/bin/deno", "--remote-components", "ejs:github"],
   "yt_cache_mb": 512,
   "yt_audio_quality": "bestaudio",
-  "save_lyrics_next_to_songs": true
+  "save_lyrics_next_to_songs": true,
+  "youtube_browser": null
 }
 ```
 
@@ -179,9 +204,11 @@ The [yt-dlp EJS guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS) describes all 
 - **Nothing plays, or downloads fail:** update `yt-dlp` first. The status line says what went wrong, and `mixed.log` has everything `yt-dlp` printed.
 - **`yt-dlp needs a JavaScript runtime for YouTube`:** the runtime or the `yt_dlp_args` setting is missing, or `yt-dlp` cannot find the runtime. If Deno is installed, name its binary in `yt_dlp_args` as shown under [JavaScript runtime](#javascript-runtime).
 - **A track takes 10 to 15 seconds to start:** that is the time `yt-dlp` needs to sign in and solve YouTube's challenge. A track that is already in the cache starts at once.
-- **`YouTube asks to sign in: add your cookie in the YouTube Library tab`:** YouTube wants a signed-in session for downloads from your network. Sign in as described under [Logging in with your browser cookie](#logging-in-with-your-browser-cookie).
-- **`YouTube rejected the saved cookie`:** the cookie has expired. Copy a fresh one, delete `youtube_cookie` from `credentials.json`, restart and sign in again.
-- **Library is empty or shows "Not connected":** the cookie is missing or has expired. Copy a fresh one and log in again.
+- **`YouTube asks to sign in: add your cookie in the YouTube Library tab`:** YouTube wants a signed-in session for downloads from your network. Sign in as described under [Signing in](#signing-in).
+- **`YouTube rejected the saved cookie`** or **"Your YouTube Music sign-in has expired":** press `Enter` in the YouTube Library tab and sign in again.
+- **Library is empty or shows "Not connected":** you are not signed in. Press `Enter` in the YouTube Library tab.
+- **"The sign-in window is already open":** a window of `mixed`'s profile is still open. Finish there and close it, then press `Enter` again.
+- **"Could not read the cookies of the sign-in window":** `yt-dlp` could not read the profile. `mixed.log` has `yt-dlp`'s explanation.
 - **Details of an error:** `mixed` writes diagnostics to `mixed.log` in its cache directory (`~/.cache/mixed/mixed.log` on Linux).
 
 ## Privacy

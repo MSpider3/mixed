@@ -1,6 +1,8 @@
 pub mod growing_file;
 pub mod pcm_source;
 pub mod player;
+#[cfg(feature = "youtube")]
+pub mod range_stream;
 pub mod rodio_backend;
 pub mod spotify_backend;
 pub mod symphonia_source;
