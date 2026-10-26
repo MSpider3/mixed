@@ -240,8 +240,16 @@ fn create_synthetic_wav(sample_rate: u32, channels: u16, duration_secs: f32) -> 
         }
     }
 
-    let path =
-        std::env::temp_dir().join(format!("mixed_test_{}ch_{}hz.wav", channels, sample_rate));
+    // Tests run in parallel and remove their file when done: each call gets its own
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "mixed_test_{}ch_{}hz_{}_{}.wav",
+        channels,
+        sample_rate,
+        std::process::id(),
+        n
+    ));
     std::fs::write(&path, data).expect("Failed to write synthetic wav");
     path
 }
