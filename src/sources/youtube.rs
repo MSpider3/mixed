@@ -55,7 +55,9 @@ use ytmapi_rs::common::{AlbumID, MoodCategoryParams, PlaylistID, Thumbnail, Vide
 #[cfg(feature = "youtube")]
 use ytmapi_rs::parse::WatchPlaylistTrack;
 #[cfg(feature = "youtube")]
-use ytmapi_rs::query::{GetMoodPlaylistsQuery, GetWatchPlaylistQuery};
+use ytmapi_rs::query::{
+    GetLibraryAlbumsQuery, GetLibrarySongsQuery, GetMoodPlaylistsQuery, GetWatchPlaylistQuery,
+};
 
 /// YouTube Music's "My Supermix": a mix made from the signed-in account's listening.
 #[cfg(feature = "youtube")]
@@ -195,6 +197,46 @@ pub enum YouTubeClientInner {
     Unauthenticated(YtMusic<NoAuthToken>),
 }
 
+/// YouTube Music now answers ytmapi-rs's HTTP/2 requests with a protocol error
+/// (seen 2026-10-31), so every request fails; over HTTP/1.1 they work.
+#[cfg(feature = "youtube")]
+fn ytmusic_builder() -> ytmapi_rs::YtMusicBuilder<ytmapi_rs::builder::NoToken> {
+    let http = reqwest_ytmapi::Client::builder()
+        .http1_only()
+        .build()
+        .expect("Expected Client build to succeed");
+    ytmapi_rs::YtMusicBuilder::new_with_client(ytmapi_rs::Client::new_from_reqwest_client(http))
+}
+
+/// Whether a library page is YouTube Music's "No albums yet" style message, which
+/// ytmapi-rs fails to parse instead of returning no items.
+#[cfg(feature = "youtube")]
+fn is_empty_library_page(page: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(page)
+        .ok()
+        .and_then(|v| {
+            v.pointer(
+                "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content\
+                 /sectionListRenderer/contents/0/itemSectionRenderer/contents/0/messageRenderer",
+            )
+            .cloned()
+        })
+        .is_some()
+}
+
+/// No items when the library section is empty, else the parse error.
+#[cfg(feature = "youtube")]
+fn empty_library_or(
+    page: Result<String, ytmapi_rs::Error>,
+    error: ytmapi_rs::Error,
+) -> Result<Vec<BrowseItem>, String> {
+    if page.is_ok_and(|p| is_empty_library_page(&p)) {
+        Ok(Vec::new())
+    } else {
+        Err(error.to_string())
+    }
+}
+
 #[cfg(feature = "youtube")]
 pub struct YouTubeClient {
     inner: Option<YouTubeClientInner>,
@@ -212,7 +254,11 @@ impl YouTubeClient {
             if crate::sources::youtube_login::is_signed_in(cookie).await == Some(false) {
                 log::warn!("The saved YouTube Music sign-in has expired");
                 expired = true;
-            } else if let Ok(client) = YtMusic::from_cookie(cookie).await {
+            } else if let Ok(client) = ytmusic_builder()
+                .with_browser_token_cookie(cookie.to_string())
+                .build()
+                .await
+            {
                 return Self {
                     inner: Some(YouTubeClientInner::Authenticated(client)),
                     expired,
@@ -220,7 +266,7 @@ impl YouTubeClient {
             }
         }
 
-        let unauth = YtMusic::new_unauthenticated().await.ok();
+        let unauth = ytmusic_builder().build().await.ok();
         Self {
             inner: unauth.map(YouTubeClientInner::Unauthenticated),
             expired,
@@ -243,7 +289,11 @@ impl YouTubeClient {
                     .to_string(),
             );
         }
-        match YtMusic::from_cookie(cookie).await {
+        match ytmusic_builder()
+            .with_browser_token_cookie(cookie.to_string())
+            .build()
+            .await
+        {
             Ok(client) => {
                 self.inner = Some(YouTubeClientInner::Authenticated(client));
                 self.expired = false;
@@ -495,7 +545,13 @@ impl YouTubeClient {
             let YouTubeClientInner::Authenticated(ref c) = inner else {
                 return Err("Authentication required for Liked Songs".to_string());
             };
-            let songs = c.get_library_songs().await.map_err(|e| e.to_string())?;
+            let songs = match c.get_library_songs().await {
+                Ok(songs) => songs,
+                Err(e) => {
+                    let page = c.raw_json_query(GetLibrarySongsQuery::default()).await;
+                    return empty_library_or(page, e);
+                }
+            };
             return Ok(songs
                 .into_iter()
                 .map(|song| {
@@ -547,7 +603,13 @@ impl YouTubeClient {
             let YouTubeClientInner::Authenticated(ref c) = inner else {
                 return Err("Authentication required for Library Albums".to_string());
             };
-            let albums = c.get_library_albums().await.map_err(|e| e.to_string())?;
+            let albums = match c.get_library_albums().await {
+                Ok(albums) => albums,
+                Err(e) => {
+                    let page = c.raw_json_query(GetLibraryAlbumsQuery::default()).await;
+                    return empty_library_or(page, e);
+                }
+            };
             return Ok(albums
                 .into_iter()
                 .map(|alb| {
@@ -718,6 +780,15 @@ impl crate::sources::MusicSource for YouTubeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "youtube")]
+    #[test]
+    fn an_empty_library_section_is_recognised() {
+        let empty = r#"{"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{"contents":[{"itemSectionRenderer":{"contents":[{"messageRenderer":{"text":{"runs":[{"text":"No albums yet"}]}}}]}}]}}}}]}}}"#;
+        assert!(is_empty_library_page(empty));
+        assert!(!is_empty_library_page(r#"{"contents":{}}"#));
+        assert!(!is_empty_library_page("not json"));
+    }
 
     #[test]
     fn covers_are_requested_in_full_size() {

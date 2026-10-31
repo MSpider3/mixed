@@ -1,6 +1,6 @@
 [package]
 name = "mixed"
-version = "1.8.0"
+version = "1.8.1"
 edition = "2021"
 description = "A next-generation terminal music player written in Rust"
 license = "GPL-3.0"
@@ -58,7 +58,9 @@ rayon = "1"
 # Async Network Runtime
 tokio = { version = "1", features = ["rt-multi-thread", "net", "process", "fs", "io-util", "macros", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
-ytmapi-rs = { version = "0.3", optional = true }
+ytmapi-rs = { version = "0.3", features = ["reqwest"], optional = true }
+# The HTTP client ytmapi-rs uses, named so mixed can give it an HTTP/1.1-only one
+reqwest-ytmapi = { package = "reqwest", version = "0.13", default-features = false, optional = true }
 librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
 librespot-playback = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"], optional = true }
@@ -71,7 +73,7 @@ log = "0.4.34"
 [features]
 default = ["spotify", "youtube"]
 spotify = ["dep:reqwest", "dep:librespot-core", "dep:librespot-playback", "dep:oauth2", "dep:open", "dep:librespot-metadata", "dep:rustls"]
-youtube = ["dep:reqwest", "dep:ytmapi-rs"]
+youtube = ["dep:reqwest", "dep:ytmapi-rs", "dep:reqwest-ytmapi"]
 
 [[example]]
 name = "spike_spotify"

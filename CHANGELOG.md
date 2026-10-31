@@ -5,6 +5,12 @@ All notable changes to the **mixed** music player will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-10-31
+
+### Fixed
+- **YouTube sign-in**: signing in failed after the browser window was closed, even with the account signed in there, and a pasted cookie failed the same way. YouTube Music now answers the HTTP/2 requests of the `ytmapi-rs` library with a protocol error, so every YouTube Music request failed, signed in or not. `mixed` now gives the library an HTTP/1.1 connection, which YouTube Music answers normally.
+- **Empty YouTube library folders**: Albums (or Liked Songs) with nothing saved showed a parse error. They now open as an empty folder.
+
 ## [1.8.0] - 2026-10-27
 
 ### Added
